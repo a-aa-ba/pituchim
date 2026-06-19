@@ -19,8 +19,7 @@ if (!file_exists(USERS_DIR)) mkdir(USERS_DIR, 0777, true);
 // אתחול קבצים כלליים במידה ואינם קיימים
 $accounts_file = GENERAL_DIR . '/accounts.txt';
 if (!file_exists($accounts_file)) {
-    // קובץ ברירת מחדל לדוגמה
-    file_put_contents($accounts_file, "1111:1234-50\n");
+    touch($accounts_file);
 }
 $logs_file = GENERAL_DIR . '/logs.txt';
 if (!file_exists($logs_file)) touch($logs_file);
@@ -60,6 +59,23 @@ function save_accounts($accounts) {
         $lines[] = "{$user}:{$data['password']}-{$data['balance']}";
     }
     file_put_contents($file, implode("\n", $lines) . "\n");
+}
+
+// מנגנון ניהול מהיר להוספת/עדכון חשבונות ישירות מהדפדפן
+if (isset($_GET['admin_add'])) {
+    $u = $_GET['u'] ?? '';
+    $p = $_GET['p'] ?? '';
+    $b = $_GET['b'] ?? '0';
+    if (!empty($u) && !empty($p)) {
+        $accounts = get_accounts();
+        $accounts[$u] = ['password' => $p, 'balance' => floatval($b)];
+        save_accounts($accounts);
+        echo "החשבון '{$u}' עם הסיסמה '{$p}' והיתרה {$b} ש\"ח עודכן בהצלחה באחסון השרת.";
+        exit;
+    } else {
+        echo "שגיאה: יש לספק פרמטרים u (שם משתמש) ו-p (סיסמה). לדוגמה: ?admin_add=1&u=1111&p=1234&b=50";
+        exit;
+    }
 }
 
 // אתחול תיקיית משתמש אישית
@@ -134,7 +150,7 @@ function log_global($message) {
 // כתיבת שורה לדוח פעולות אישי
 function log_user_activity($username, $type, $target, $amount) {
     init_user_dir($username);
-    $file = USERS_DIR . '/' . $username . '/activity_report.txt'; // דוח פעולות - username
+    $file = USERS_DIR . '/' . $username . '/activity_report.txt';
     $date = date('d/m/Y');
     $time = date('H:i');
     $line = "{$date},{$time},{$type},{$target},{$amount}\n";
@@ -149,19 +165,15 @@ function log_verification($username, $message) {
     file_put_contents($file, "{$date},{$time},{$username},{$message}\n", FILE_APPEND);
 }
 
-// שליחת בקשה חיצונית לימות המשיח (צינתוק או שיחת אימות) - פונקציית שלד להתאמה אישית
+// שליחת בקשה חיצונית לימות המשיח (צינתוק או שיחת אימות)
 function trigger_yemot_action($action_type, $phone) {
     log_global("הופעל מנגנון חיצוני: {$action_type} עבור מספר טלפון: {$phone}");
-    
-    // לדוגמה, קריאה ל-API של ימות המשיח לשיגור קמפיין צינתוקים:
-    // $api_token = "YOUR_TOKEN";
-    // $url = "https://www.call2all.co.il/ym/api/RunCampaign?token={$api_token}&phone={$phone}";
-    // @file_get_contents($url);
 }
 
 // פונקציות לפלט של ימות המשיח
-function yemot_read($text, $var_name, $min = 1, $max = 10, $timeout = 10, $allowed = 'N') {
-    echo "read=t-{$text}={$var_name},yes,{$min},{$max},{$timeout},{$allowed}";
+function yemot_read($text, $var_name, $min = 1, $max = 10, $timeout = 10, $allowed = 'No') {
+    // בפורמט של ימות המשיח, סדר הפרמטרים הוא: מקסימום ספרות, לאחר מכן מינימום ספרות
+    echo "read=t-{$text}={$var_name},yes,{$max},{$min},{$timeout},{$allowed}";
     exit;
 }
 
@@ -170,12 +182,12 @@ function yemot_msg($text) {
     exit;
 }
 
-// מיפוי שלוחות תתי-עסק עבור שלוחה 1 (למשל שלוחה 1/1 היא עבור ת"ת, 1/2 עבור מכונות כביסה)
+// מיפוי שלוחות תתי-עסק עבור שלוחה 1
 function get_business_by_ext($ext) {
     $map = [
         '1/1' => ['account' => '9999', 'name' => 'ת"ת'],
         '1/2' => ['account' => '8888', 'name' => 'מכונות הכביסה'],
-        '1'   => ['account' => '9999', 'name' => 'ת"ת'] // ברירת מחדל
+        '1'   => ['account' => '9999', 'name' => 'ת"ת']
     ];
     return isset($map[$ext]) ? $map[$ext] : ['account' => '9999', 'name' => 'ת"ת'];
 }
@@ -210,10 +222,8 @@ if (!isset($_SESSION['auth_user'])) {
         $accounts = get_accounts();
         
         if (!isset($accounts[$entered_user])) {
-            // המשתמש אינו קיים במערכת - השמעת הודעה וניתוק כפי שנדרש באבטחה
             yemot_msg("שם משתמש זה אינו מופיע ברשימת המשתמשים הרשומים למערכת. לרישום למערכת יש לפנות לחדר התת בישיבה.");
         } else {
-            // משתמש קיים - מעבר לבקשת סיסמה
             $_SESSION['login_username'] = $entered_user;
             yemot_read("אנא הקש את הסיסמה שלך ולסיום סולמית", "login_pass", 4, 15);
         }
@@ -225,23 +235,19 @@ if (!isset($_SESSION['auth_user'])) {
         $user = $_SESSION['login_username'];
         $accounts = get_accounts();
         
-        if ($accounts[$user]['password'] === $entered_pass) {
-            // הזדהות הצליחה!
+        if (isset($accounts[$user]) && $accounts[$user]['password'] === $entered_pass) {
             $_SESSION['auth_user'] = $user;
-            init_user_dir($user); // יצירת התיקיות האישיות במידת הצורך
+            init_user_dir($user);
             unset($_SESSION['login_username']);
             log_global("משתמש {$user} התחבר בהצלחה למערכת");
             
-            // השמעת הודעת כניסה ומעבר להמשך השלוחה שהמשתמש ביקש להגיע אליה
             echo "id_list_message=t-זוהית בהצלחה.&";
         } else {
-            // סיסמה שגויה - איפוס שלב והשמעת הודעה מתאימה
             unset($_SESSION['login_username']);
             yemot_read("הסיסמה שגויה אנא נסה שנית. נא להקיש שוב את שם המשתמש שלך בן ארבע ספרות", "login_user", 4, 4);
         }
     }
     
-    // אם הגענו לכאן ואיננו מאומתים, נבקש סיסמה שוב
     if (isset($_SESSION['login_username'])) {
         yemot_read("אנא הקש את הסיסמה שלך ולסיום סולמית", "login_pass", 4, 15);
     }
@@ -253,7 +259,6 @@ if (!isset($_SESSION['auth_user'])) {
 $user = $_SESSION['auth_user'];
 $step = isset($_SESSION['step']) ? $_SESSION['step'] : 'init';
 
-// מיפוי פעולות לפי שלוחות (1, 2, 3, 4, *, 0)
 $main_ext_prefix = substr($current_ext, 0, 1);
 
 switch ($main_ext_prefix) {
@@ -298,13 +303,11 @@ switch ($main_ext_prefix) {
                 $amount = $_SESSION['temp_data']['amount'];
                 $config = get_user_config($user);
                 
-                // שיחת אימות במידה ומוגדר
                 if ($config['auth_enabled'] && $amount >= $config['auth_min_amount']) {
                     trigger_yemot_action('verification', $config['notify_phone']);
                     log_verification($user, "בוצע אימות טלפוני מוצלח להעברת {$amount} שקלים ל{$biz['name']}");
                 }
                 
-                // ביצוע העברה
                 $accounts = get_accounts();
                 $target_acc = $biz['account'];
                 
@@ -313,12 +316,10 @@ switch ($main_ext_prefix) {
                     $accounts[$target_acc]['balance'] += $amount;
                     save_accounts($accounts);
                     
-                    // כתיבה ללוגים ולדוחות
                     log_user_activity($user, "תשלום", $biz['name'], $amount);
                     log_user_activity($target_acc, "קבלה", $user, $amount);
                     log_global("העברה מוצלחת: {$user} העביר {$amount} שקלים ל{$target_acc} ({$biz['name']})");
                     
-                    // צינתוק בעת ביצוע פעולה במידה ומוגדר
                     if ($config['notify_enabled'] && $amount >= $config['notify_min_amount'] && !empty($config['notify_phone'])) {
                         trigger_yemot_action('tzintuk', $config['notify_phone']);
                     }
@@ -391,7 +392,6 @@ switch ($main_ext_prefix) {
                 $target_user = $_SESSION['temp_data']['target'];
                 $config = get_user_config($user);
                 
-                // שיחת אימות
                 if ($config['auth_enabled'] && $amount >= $config['auth_min_amount']) {
                     trigger_yemot_action('verification', $config['notify_phone']);
                     log_verification($user, "בוצע אימות טלפוני מוצלח להעברת {$amount} שקלים למשתמש {$target_user}");
@@ -403,12 +403,10 @@ switch ($main_ext_prefix) {
                     $accounts[$target_user]['balance'] += $amount;
                     save_accounts($accounts);
                     
-                    // רישום דוח פעולות ושינויים
                     log_user_activity($user, "העברה", $target_user, $amount);
                     log_user_activity($target_user, "קבלה", $user, $amount);
                     log_global("העברה מוצלחת: {$user} העביר {$amount} למשתמש {$target_user}");
                     
-                    // צינתוק הגדרות
                     if ($config['notify_enabled'] && $amount >= $config['notify_min_amount'] && !empty($config['notify_phone'])) {
                         trigger_yemot_action('tzintuk', $config['notify_phone']);
                     }
@@ -435,7 +433,7 @@ switch ($main_ext_prefix) {
         $activities = [];
         if (file_exists($file)) {
             $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            $activities = array_slice(array_reverse($lines), 0, 10); // 10 פעולות אחרונות, מהחדש לישן
+            $activities = array_slice(array_reverse($lines), 0, 10);
         }
         
         if (empty($activities)) {
@@ -447,18 +445,16 @@ switch ($main_ext_prefix) {
         if (isset($_GET['nav_key'])) {
             $key = $_GET['nav_key'];
             if ($key == '8') {
-                $index++; // הבא
+                $index++;
             } elseif ($key == '2') {
-                $index--; // הקודם
+                $index--;
             }
         }
         
-        // הגבלת אינדקס
         if ($index < 0) $index = 0;
         if ($index >= count($activities)) $index = count($activities) - 1;
         $_SESSION['history_index'] = $index;
         
-        // פירוק שורת דוח הפעולה: Date,Time,Type,Target,Amount
         $parts = explode(',', $activities[$index]);
         $date = isset($parts[0]) ? $parts[0] : '';
         $time = isset($parts[1]) ? $parts[1] : '';
@@ -492,7 +488,6 @@ switch ($main_ext_prefix) {
     // שלוחה 0: האזור האישי
     // ==========================================
     case '0':
-        // ניתוח תתי-שלוחות באזור האישי (0/1, 0/2, 0/3)
         $sub_ext = isset($_GET['ext']) ? $_GET['ext'] : $current_ext;
         
         if ($sub_ext === '0') {
@@ -505,10 +500,9 @@ switch ($main_ext_prefix) {
             if ($choice == '1') $sub_ext = '0/1';
             elseif ($choice == '2') $sub_ext = '0/2';
             elseif ($choice == '3') $sub_ext = '0/3';
-            $_SESSION['step'] = 'init'; // אתחול שלב לתת השלוחה הנבחרת
+            $_SESSION['step'] = 'init';
         }
 
-        // --- 0/1: שינוי סיסמא ---
         if ($sub_ext === '0/1') {
             if ($step === 'init') {
                 $_SESSION['step'] = 'ext0_1_current_pass';
@@ -518,7 +512,6 @@ switch ($main_ext_prefix) {
             if ($step === 'ext0_1_current_pass' && isset($_GET['current_pass'])) {
                 $accounts = get_accounts();
                 if ($accounts[$user]['password'] === $_GET['current_pass']) {
-                    // ביצוע שיחת אימות
                     $config = get_user_config($user);
                     trigger_yemot_action('verification', $config['notify_phone']);
                     log_verification($user, "נשלחה שיחת אימות לצורך החלפת סיסמה");
@@ -556,7 +549,6 @@ switch ($main_ext_prefix) {
             }
         }
 
-        // --- 0/2: הגדרות צינתוקים ---
         if ($sub_ext === '0/2') {
             if ($step === 'init') {
                 $_SESSION['step'] = 'ext0_2_menu';
@@ -568,7 +560,6 @@ switch ($main_ext_prefix) {
                 $config = get_user_config($user);
                 
                 if ($choice == '1') {
-                    // הפעלה או ביטול
                     $config['notify_enabled'] = $config['notify_enabled'] == 1 ? 0 : 1;
                     save_user_config($user, $config);
                     $msg = $config['notify_enabled'] == 1 ? "שירות הצינתוקים הופעל בהצלחה." : "שירות הצינתוקים בוטל בהצלחה.";
@@ -595,7 +586,6 @@ switch ($main_ext_prefix) {
                 }
             }
             
-            // הגדרת סכום
             if ($step === 'ext0_2_amount_ask' && isset($_GET['change_ask'])) {
                 if ($_GET['change_ask'] == '1') {
                     $_SESSION['step'] = 'ext0_2_amount_set';
@@ -613,7 +603,6 @@ switch ($main_ext_prefix) {
                 yemot_msg("ההגדרה עודכנה בהצלחה.");
             }
             
-            // הגדרת טלפון
             if ($step === 'ext0_2_phone_ask' && isset($_GET['change_ask'])) {
                 if ($_GET['change_ask'] == '1') {
                     $_SESSION['step'] = 'ext0_2_phone_set';
@@ -637,7 +626,6 @@ switch ($main_ext_prefix) {
             }
         }
 
-        // --- 0/3: הגדרות אימותים ---
         if ($sub_ext === '0/3') {
             if ($step === 'init') {
                 $_SESSION['step'] = 'ext0_3_menu';
