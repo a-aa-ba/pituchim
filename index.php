@@ -10,7 +10,7 @@ session_start();
 // -----------------------------------------------------------------------------
 // הגדרת קישור הגוגל סקריפט שלכם
 // -----------------------------------------------------------------------------
-define('GSHEET_API_URL', 'נא_להדביק_כאן_את_הקישור_שהעתקתם_מגוגל_סקריפט');
+define('GSHEET_API_URL', 'https://script.google.com/macros/s/AKfycbyutWqr3ozMwzd9dJUxkOXkfQmVM8QS-kRCDF-bwgm7utJTFnLYtL0ndrCIVHBKj2Vw/exec');
 
 // פונקציית תקשורת מול גוגל שיטס דרך API
 function call_gsheet_api($params, $post_data = null) {
