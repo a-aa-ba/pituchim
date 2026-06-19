@@ -2,177 +2,114 @@
 // הגדרת סוג התוכן כטקסט פשוט בעברית עבור ימות המשיח
 header('Content-Type: text/plain; charset=utf-8');
 
-// הפעלת סשן מבוסס מזהה שיחה טלפונית (ApiCallId) של ימות המשיח לשמירה על שלבי הניווט בשיחה
+// הפעלת סשן מבוסס מזהה שיחה טלפונית (ApiCallId) של ימות המשיח
 $call_id = isset($_GET['ApiCallId']) ? $_GET['ApiCallId'] : 'test_session';
 session_id($call_id);
 session_start();
 
-// הגדרת נתיבי תיקיות האחסון בשרת
-define('STORAGE_DIR', __DIR__ . '/storage');
-define('GENERAL_DIR', STORAGE_DIR . '/general');
-define('USERS_DIR', STORAGE_DIR . '/users');
+// -----------------------------------------------------------------------------
+// הגדרת קישור הגוגל סקריפט שלכם
+// -----------------------------------------------------------------------------
+define('GSHEET_API_URL', 'נא_להדביק_כאן_את_הקישור_שהעתקתם_מגוגל_סקריפט');
 
-// יצירת תיקיות הבסיס במידה והן לא קיימות
-if (!file_exists(GENERAL_DIR)) mkdir(GENERAL_DIR, 0777, true);
-if (!file_exists(USERS_DIR)) mkdir(USERS_DIR, 0777, true);
-
-// אתחול קבצים כלליים במידה ואינם קיימים
-$accounts_file = GENERAL_DIR . '/accounts.txt';
-if (!file_exists($accounts_file)) {
-    touch($accounts_file);
+// פונקציית תקשורת מול גוגל שיטס דרך API
+function call_gsheet_api($params, $post_data = null) {
+    $url = GSHEET_API_URL . '?' . http_build_query($params);
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); // גוגל מבצע הפניה (Redirect) ולכן שורה זו קריטית!
+    if ($post_data !== null) {
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($post_data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    }
+    $response = curl_exec($ch);
+    curl_close($ch);
+    return $response;
 }
-$logs_file = GENERAL_DIR . '/logs.txt';
-if (!file_exists($logs_file)) touch($logs_file);
-
-$verif_pass_file = GENERAL_DIR . '/verifications_and_passwords.txt';
-if (!file_exists($verif_pass_file)) touch($verif_pass_file);
-
-$notif_config_file = GENERAL_DIR . '/notifications_config.txt';
-if (!file_exists($notif_config_file)) touch($notif_config_file);
 
 // -----------------------------------------------------------------------------
-// פונקציות עזר לניהול האחסון והדוחות
+// פונקציות תקשורת נתונים
 // -----------------------------------------------------------------------------
 
-// קריאת כל החשבונות מהקובץ
+// קריאת כל החשבונות מגוגל שיטס
 function get_accounts() {
-    $file = GENERAL_DIR . '/accounts.txt';
-    $accounts = [];
-    if (!file_exists($file)) return $accounts;
-    $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        if (preg_match('/^([^:]+):([^-]+)-(.+)$/', $line, $matches)) {
-            $accounts[$matches[1]] = [
-                'password' => $matches[2],
-                'balance' => floatval($matches[3])
-            ];
-        }
-    }
-    return $accounts;
+    $res = call_gsheet_api(['action' => 'getAccounts']);
+    $data = json_decode($res, true);
+    return is_array($data) ? $data : [];
 }
 
-// שמירת כל החשבונות לקובץ
-function save_accounts($accounts) {
-    $file = GENERAL_DIR . '/accounts.txt';
-    $lines = [];
-    foreach ($accounts as $user => $data) {
-        $lines[] = "{$user}:{$data['password']}-{$data['balance']}";
-    }
-    file_put_contents($file, implode("\n", $lines) . "\n");
+// עדכון חשבונות מרוכז (משמש להעברות כספים כדי למנוע כפילויות)
+function save_accounts_bulk($updates) {
+    call_gsheet_api(['action' => 'saveAccountsBulk'], [
+        'action' => 'saveAccountsBulk',
+        'updates' => $updates
+    ]);
 }
 
-// מנגנון ניהול מהיר להוספת/עדכון חשבונות ישירות מהדפדפן
-if (isset($_GET['admin_add'])) {
-    $u = $_GET['u'] ?? '';
-    $p = $_GET['p'] ?? '';
-    $b = $_GET['b'] ?? '0';
-    if (!empty($u) && !empty($p)) {
-        $accounts = get_accounts();
-        $accounts[$u] = ['password' => $p, 'balance' => floatval($b)];
-        save_accounts($accounts);
-        echo "החשבון '{$u}' עם הסיסמה '{$p}' והיתרה {$b} ש\"ח עודכן בהצלחה באחסון השרת.";
-        exit;
-    } else {
-        echo "שגיאה: יש לספק פרמטרים u (שם משתמש) ו-p (סיסמה). לדוגמה: ?admin_add=1&u=1111&p=1234&b=50";
-        exit;
-    }
-}
-
-// אתחול תיקיית משתמש אישית
-function init_user_dir($username) {
-    $user_dir = USERS_DIR . '/' . $username;
-    if (!file_exists($user_dir)) {
-        mkdir($user_dir, 0777, true);
-    }
-    $recordings_dir = $user_dir . '/recordings';
-    if (!file_exists($recordings_dir)) {
-        mkdir($recordings_dir, 0777, true);
-    }
-}
-
-// קריאת הגדרות צינתוקים ואימותים של משתמש
+// קריאת הגדרות משתמש מגוגל שיטס
 function get_user_config($username) {
-    $file = GENERAL_DIR . '/notifications_config.txt';
-    $default = [
+    $res = call_gsheet_api(['action' => 'getUserConfig', 'user' => $username]);
+    $data = json_decode($res, true);
+    return is_array($data) ? $data : [
         'notify_enabled' => 0,
         'notify_min_amount' => 0,
         'notify_phone' => '',
         'auth_enabled' => 0,
         'auth_min_amount' => 0
     ];
-    if (!file_exists($file)) return $default;
-    $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        $parts = explode(':', $line);
-        if ($parts[0] === $username) {
-            return [
-                'notify_enabled' => isset($parts[1]) ? (int)$parts[1] : 0,
-                'notify_min_amount' => isset($parts[2]) ? (float)$parts[2] : 0,
-                'notify_phone' => isset($parts[3]) ? $parts[3] : '',
-                'auth_enabled' => isset($parts[4]) ? (int)$parts[4] : 0,
-                'auth_min_amount' => isset($parts[5]) ? (float)$parts[5] : 0
-            ];
-        }
-    }
-    return $default;
 }
 
-// שמירת הגדרות צינתוקים ואימותים של משתמש
+// שמירת הגדרות משתמש לגוגל שיטס
 function save_user_config($username, $config) {
-    $file = GENERAL_DIR . '/notifications_config.txt';
-    $lines = [];
-    if (file_exists($file)) {
-        $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    }
-    $updated = false;
-    $new_line = "{$username}:{$config['notify_enabled']}:{$config['notify_min_amount']}:{$config['notify_phone']}:{$config['auth_enabled']}:{$config['auth_min_amount']}";
-    foreach ($lines as $idx => $line) {
-        $parts = explode(':', $line);
-        if ($parts[0] === $username) {
-            $lines[$idx] = $new_line;
-            $updated = true;
-            break;
-        }
-    }
-    if (!$updated) {
-        $lines[] = $new_line;
-    }
-    file_put_contents($file, implode("\n", $lines) . "\n");
+    call_gsheet_api(['action' => 'saveUserConfig'], array_merge(['action' => 'saveUserConfig', 'user' => $username], $config));
 }
 
-// כתיבת שורה ללוג הכללי
+// כתיבה ללוג הכללי בגוגל שיטס
 function log_global($message) {
-    $file = GENERAL_DIR . '/logs.txt';
-    $timestamp = date('Y-m-d H:i:s');
-    file_put_contents($file, "[{$timestamp}] {$message}\n", FILE_APPEND);
+    call_gsheet_api(['action' => 'logGlobal'], [
+        'action' => 'logGlobal',
+        'message' => $message
+    ]);
 }
 
-// כתיבת שורה לדוח פעולות אישי
+// כתיבה לדוח פעולות אישי בגוגל שיטס
 function log_user_activity($username, $type, $target, $amount) {
-    init_user_dir($username);
-    $file = USERS_DIR . '/' . $username . '/activity_report.txt';
     $date = date('d/m/Y');
     $time = date('H:i');
-    $line = "{$date},{$time},{$type},{$target},{$amount}\n";
-    file_put_contents($file, $line, FILE_APPEND);
+    call_gsheet_api(['action' => 'logActivity'], [
+        'action' => 'logActivity',
+        'user' => $username,
+        'date' => $date,
+        'time' => $time,
+        'type' => $type,
+        'target' => $target,
+        'amount' => $amount
+    ]);
 }
 
-// כתיבת שורה לדוח אימותים ושינוי סיסמאות
+// כתיבה ללוג אימותים בגוגל שיטס
 function log_verification($username, $message) {
-    $file = GENERAL_DIR . '/verifications_and_passwords.txt';
     $date = date('d/m/Y');
     $time = date('H:i');
-    file_put_contents($file, "{$date},{$time},{$username},{$message}\n", FILE_APPEND);
+    call_gsheet_api(['action' => 'logVerification'], [
+        'action' => 'logVerification',
+        'user' => $username,
+        'date' => $date,
+        'time' => $time,
+        'message' => $message
+    ]);
 }
 
-// שליחת בקשה חיצונית לימות המשיח (צינתוק או שיחת אימות)
+// הדמיית פונקציה חיצונית לביצוע צינתוק או אימות טלפוני
 function trigger_yemot_action($action_type, $phone) {
     log_global("הופעל מנגנון חיצוני: {$action_type} עבור מספר טלפון: {$phone}");
 }
 
-// פונקציות לפלט של ימות המשיח
+// פונקציות להחזרת תשובה לימות המשיח בפורמט הנדרש
 function yemot_read($text, $var_name, $min = 1, $max = 10, $timeout = 10, $allowed = 'No') {
-    // בפורמט של ימות המשיח, סדר הפרמטרים הוא: מקסימום ספרות, לאחר מכן מינימום ספרות
+    // בפורמט של ימות המשיח, סדר המספרים הוא: [מקסימום ספרות], [מינימום ספרות]
     echo "read=t-{$text}={$var_name},yes,{$max},{$min},{$timeout},{$allowed}";
     exit;
 }
@@ -182,7 +119,7 @@ function yemot_msg($text) {
     exit;
 }
 
-// מיפוי שלוחות תתי-עסק עבור שלוחה 1
+// מיפוי שלוחות תשלום עבור שלוחה 1 (עסק מוגדר מראש)
 function get_business_by_ext($ext) {
     $map = [
         '1/1' => ['account' => '9999', 'name' => 'ת"ת'],
@@ -196,7 +133,6 @@ function get_business_by_ext($ext) {
 // מנגנון ניתוב ושמירת שלב נוכחי
 // -----------------------------------------------------------------------------
 
-// זיהוי השלוחה הנוכחית
 $current_ext = isset($_GET['ext']) ? $_GET['ext'] : (isset($_GET['ApiExtension']) ? $_GET['ApiExtension'] : 'main');
 
 // איפוס שלבי שיחה פנימיים אם המאזין עבר שלוחה באופן אקטיבי בטלפון
@@ -211,7 +147,7 @@ if (!isset($_SESSION['last_ext']) || $_SESSION['last_ext'] !== $current_ext) {
 // -----------------------------------------------------------------------------
 if (!isset($_SESSION['auth_user'])) {
     
-    // א) אם המשתמש טרם הקיש קוד משתמש (4 ספרות)
+    // א) בקשת קוד משתמש (4 ספרות)
     if (!isset($_SESSION['login_username']) && !isset($_GET['login_user'])) {
         yemot_read("אנא הקש את שם המשתמש שלך בן ארבע ספרות", "login_user", 4, 4);
     }
@@ -237,7 +173,6 @@ if (!isset($_SESSION['auth_user'])) {
         
         if (isset($accounts[$user]) && $accounts[$user]['password'] === $entered_pass) {
             $_SESSION['auth_user'] = $user;
-            init_user_dir($user);
             unset($_SESSION['login_username']);
             log_global("משתמש {$user} התחבר בהצלחה למערכת");
             
@@ -314,7 +249,13 @@ switch ($main_ext_prefix) {
                 if (isset($accounts[$user]) && isset($accounts[$target_acc])) {
                     $accounts[$user]['balance'] -= $amount;
                     $accounts[$target_acc]['balance'] += $amount;
-                    save_accounts($accounts);
+                    
+                    // שמירה מרוכזת בגוגל שיטס
+                    $updates = [
+                        ['user' => $user, 'pass' => $accounts[$user]['password'], 'balance' => $accounts[$user]['balance']],
+                        ['user' => $target_acc, 'pass' => $accounts[$target_acc]['password'], 'balance' => $accounts[$target_acc]['balance']]
+                    ];
+                    save_accounts_bulk($updates);
                     
                     log_user_activity($user, "תשלום", $biz['name'], $amount);
                     log_user_activity($target_acc, "קבלה", $user, $amount);
@@ -401,7 +342,13 @@ switch ($main_ext_prefix) {
                 if (isset($accounts[$user]) && isset($accounts[$target_user])) {
                     $accounts[$user]['balance'] -= $amount;
                     $accounts[$target_user]['balance'] += $amount;
-                    save_accounts($accounts);
+                    
+                    // שמירה מרוכזת בגוגל שיטס
+                    $updates = [
+                        ['user' => $user, 'pass' => $accounts[$user]['password'], 'balance' => $accounts[$user]['balance']],
+                        ['user' => $target_user, 'pass' => $accounts[$target_user]['password'], 'balance' => $accounts[$target_user]['balance']]
+                    ];
+                    save_accounts_bulk($updates);
                     
                     log_user_activity($user, "העברה", $target_user, $amount);
                     log_user_activity($target_user, "קבלה", $user, $amount);
@@ -429,12 +376,12 @@ switch ($main_ext_prefix) {
     // שלוחה 3: היסטוריית פעולות (ניווט מקשים)
     // ==========================================
     case '3':
-        $file = USERS_DIR . '/' . $user . '/activity_report.txt';
-        $activities = [];
-        if (file_exists($file)) {
-            $lines = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            $activities = array_slice(array_reverse($lines), 0, 10);
-        }
+        // משיכת דוח הפעילויות של המשתמש ישירות מגוגל שיטס
+        $res = call_gsheet_api(['action' => 'getUserActivity', 'user' => $user]);
+        $activities = json_decode($res, true);
+        if (!is_array($activities)) $activities = [];
+        
+        $activities = array_slice(array_reverse($activities), 0, 10);
         
         if (empty($activities)) {
             yemot_msg("אין פעולות קודמות בחשבונך.");
@@ -465,7 +412,7 @@ switch ($main_ext_prefix) {
         $direction = ($type === 'קבלה') ? "מ" : "ל";
         $tts_msg = "בתאריך {$date}, בשעה {$time}, בוצעה פעולה של {$type} {$direction} חשבונך, עם גורם {$target}, על סך של {$amount} שקלים. למעבר לפעולה הבאה הקש 8, לפעולה הקודמת הקש 2, ליציאה הקש סולמית";
         
-        yemot_read($tts_msg, "nav_key", 1, 1, 10, "2,8,#");
+        yemot_read($tts_msg, "nav_key", 1, 1, 10, "No");
         break;
 
     // ==========================================
@@ -535,7 +482,12 @@ switch ($main_ext_prefix) {
                     $new_pass = $_SESSION['temp_data']['new_pass'];
                     $accounts = get_accounts();
                     $accounts[$user]['password'] = $new_pass;
-                    save_accounts($accounts);
+                    
+                    // שמירת הסיסמה החדשה לגוגל שיטס
+                    $updates = [
+                        ['user' => $user, 'pass' => $new_pass, 'balance' => $accounts[$user]['balance']]
+                    ];
+                    save_accounts_bulk($updates);
                     
                     log_verification($user, "הסיסמה שונתה בהצלחה");
                     unset($_SESSION['step']);
