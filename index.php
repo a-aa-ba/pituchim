@@ -10,37 +10,16 @@ session_start();
 // הגדרת נתיבי תיקיות האחסון בשרת
 define('STORAGE_DIR', __DIR__ . '/storage');
 define('GENERAL_DIR', STORAGE_DIR . '/general');
-define('USERS_DIR', STORAGE_DIR . '/users');
+
+// הגדרת קישור הגוגל סקריפט שלכם
+define('GSHEET_API_URL', 'https://script.google.com/macros/s/AKfycbxqMFnw0dOUfcyBVHsEz7Zv5onxTw33JCbPRp06z_onZMfOLb25zA3jQCHpWjd72XE/exec');
 
 // יצירת תיקיות הבסיס במידה והן לא קיימות
 if (!file_exists(GENERAL_DIR)) mkdir(GENERAL_DIR, 0777, true);
-if (!file_exists(USERS_DIR)) mkdir(USERS_DIR, 0777, true);
 
 // -----------------------------------------------------------------------------
-// הגדרת קישור הגוגל סקריפט שלכם (נא להחליף בקישור שלכם!)
+// פונקציות תשתית לתקשורת מול גוגל שיטס
 // -----------------------------------------------------------------------------
-define('GSHEET_API_URL', 'https://script.google.com/macros/s/AKfycbyutWqr3ozMwzd9dJUxkOXkfQmVM8QS-kRCDF-bwgm7utJTFnLYtL0ndrCIVHBKj2Vw/exec');
-
-// פונקציית כתיבת לוג לשרת ה-Render המקומי בעברית מפורטת
-function log_response_to_local($response_string) {
-    $file = GENERAL_DIR . '/logs.txt';
-    
-    // תרגום פקודות ה-API לעברית קריאה עבור הלוגים המקומיים
-    $readable = $response_string;
-    if (preg_match('/read=t-([^=]+)=([^,]+)/', $response_string, $matches)) {
-        $text_to_play = $matches[1];
-        $var_name = $matches[2];
-        $readable = "בקשת קלט מהמשתמש: השמעת הטקסט \"{$text_to_play}\" ושמירתו במשתנה \"{$var_name}\"";
-    } elseif (preg_match('/id_list_message=t-([^&]+)/', $response_string, $matches)) {
-        $text_to_play = $matches[1];
-        $readable = "השמעת הודעה למשתמש: \"{$text_to_play}\"";
-    }
-    
-    $timestamp = date('Y-m-d H:i:s');
-    file_put_contents($file, "[{$timestamp}] תגובת השרת שנשלחה: {$readable} (קוד גולמי: {$response_string})\n", FILE_APPEND);
-}
-
-// פונקציית תקשורת רגילה (חוסמת) מול גוגל שיטס - משמשת רק לטעינת נתונים
 function call_gsheet_api($params, $post_data = null) {
     $url = GSHEET_API_URL . '?' . http_build_query($params);
     $ch = curl_init();
@@ -57,90 +36,38 @@ function call_gsheet_api($params, $post_data = null) {
     return $response;
 }
 
-// פונקציית תקשורת מהירה ולא-חוסמת (אסינכרונית) - משמשת לרישום לוגים ודוחות ללא המתנה טלפונית
-function call_gsheet_api_async($params, $post_data = null) {
-    $url = GSHEET_API_URL . '?' . http_build_query($params);
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT_MS, 600); // נותנים לגוגל חצי שנייה להתחיל לעבד, ומנתקים מגע לטובת המאזין בטלפון
-    if ($post_data !== null) {
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($post_data));
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+// תרגום פקודות הטלפוניה לעברית פשוטה עבור הלוגים
+function translate_response_to_hebrew($response_string) {
+    $readable = $response_string;
+    if (preg_match('/read=t-([^=]+)=([^,]+)/', $response_string, $matches)) {
+        $readable = "קלט משתמש: השמעת \"{$matches[1]}\" ושמירה ב-\"{$matches[2]}\"";
+    } elseif (preg_match('/id_list_message=t-([^&]+)/', $response_string, $matches)) {
+        $readable = "הודעה למאזין: \"{$matches[1]}\"";
     }
-    curl_exec($ch);
-    curl_close($ch);
+    return $readable;
 }
 
 // -----------------------------------------------------------------------------
-// פונקציות תקשורת נתונים עם מנגנון זיכרון מטמון מקומי בשרת (Caching)
+// ניהול קבצי נתונים מקומיים בשרת (Render Local Fast Files)
 // -----------------------------------------------------------------------------
 
-// קריאת כל החשבונות מקובץ מטמון מקומי (אם קיים וטרי פחות מ-3 דקות)
+// קריאת חשבונות מקומית מהירה (0ms)
 function get_accounts() {
-    $cache_file = GENERAL_DIR . '/accounts_cache.json';
-    $cache_lifetime = 180; // 3 דקות מטמון
-    
-    if (file_exists($cache_file) && (time() - filemtime($cache_file) < $cache_lifetime)) {
-        $data = json_decode(file_get_contents($cache_file), true);
-        if (is_array($data)) {
-            return $data;
-        }
-    }
-    // אם המטמון פג תוקף, נטען מחדש מגוגל
-    return force_reload_accounts();
+    $file = GENERAL_DIR . '/accounts.json';
+    if (!file_exists($file)) return [];
+    $data = json_decode(file_get_contents($file), true);
+    return is_array($data) ? $data : [];
 }
 
-// טעינה נקייה ומאולצת מגוגל שיטס ועדכון קובץ המטמון המקומי
-function force_reload_accounts() {
-    $cache_file = GENERAL_DIR . '/accounts_cache.json';
-    $res = call_gsheet_api(['action' => 'getAccounts']);
-    $data = json_decode($res, true);
-    if (is_array($data)) {
-        file_put_contents($cache_file, json_encode($data));
-        return $data;
-    }
-    return [];
+// שמירת חשבונות מקומית מהירה (0ms)
+function save_accounts_local($accounts) {
+    $file = GENERAL_DIR . '/accounts.json';
+    file_put_contents($file, json_encode($accounts));
 }
 
-// עדכון חשבונות מרוכז - מעדכן מיידית את המטמון המקומי ושולח עדכון לגוגל שיטס
-function save_accounts_bulk($updates) {
-    $cache_file = GENERAL_DIR . '/accounts_cache.json';
-    $cached = [];
-    if (file_exists($cache_file)) {
-        $cached = json_decode(file_get_contents($cache_file), true);
-    }
-    if (!is_array($cached)) $cached = [];
-    
-    foreach ($updates as $update) {
-        $u = $update['user'];
-        $cached[$u] = [
-            'password' => $update['pass'],
-            'balance' => $update['balance']
-        ];
-    }
-    file_put_contents($cache_file, json_encode($cached));
-    
-    // שליחה לגוגל שיטס
-    call_gsheet_api(['action' => 'saveAccountsBulk'], [
-        'action' => 'saveAccountsBulk',
-        'updates' => $updates
-    ]);
-}
-
-// קריאת הגדרות משתמש עם מנגנון זיכרון מטמון
+// קריאת הגדרות משתמש מהירה (0ms)
 function get_user_config($username) {
-    if (isset($_SESSION['cached_config'][$username])) {
-        return $_SESSION['cached_config'][$username];
-    }
-    $res = call_gsheet_api(['action' => 'getUserConfig', 'user' => $username]);
-    $data = json_decode($res, true);
-    if (is_array($data)) {
-        $_SESSION['cached_config'][$username] = $data;
-        return $data;
-    }
+    $file = GENERAL_DIR . '/configs.json';
     $default = [
         'notify_enabled' => 0,
         'notify_min_amount' => 0,
@@ -148,50 +75,62 @@ function get_user_config($username) {
         'auth_enabled' => 0,
         'auth_min_amount' => 0
     ];
-    $_SESSION['cached_config'][$username] = $default;
-    return $default;
+    if (!file_exists($file)) return $default;
+    $data = json_decode(file_get_contents($file), true);
+    return isset($data[$username]) ? $data[$username] : $default;
 }
 
-// שמירת הגדרות משתמש לגוגל שיטס ועדכון הזיכרון המקומי
-function save_user_config($username, $config) {
-    $_SESSION['cached_config'][$username] = $config;
-    call_gsheet_api(['action' => 'saveUserConfig'], array_merge(['action' => 'saveUserConfig', 'user' => $username], $config));
+// שמירת הגדרות משתמש מהירה (0ms)
+function save_user_config_local($username, $config) {
+    $file = GENERAL_DIR . '/configs.json';
+    $data = file_exists($file) ? json_decode(file_get_contents($file), true) : [];
+    if (!is_array($data)) $data = [];
+    $data[$username] = $config;
+    file_put_contents($file, json_encode($data));
 }
 
-// כתיבה ללוג הכללי בגוגל שיטס (בשיטה אסינכרונית מהירה ללא המתנה)
+// כתיבת לוגים מקומיים מהירה
+function log_response_to_local($response_string) {
+    $file = GENERAL_DIR . '/logs.txt';
+    $timestamp = date('Y-m-d H:i:s');
+    $readable = translate_response_to_hebrew($response_string);
+    file_put_contents($file, "[{$timestamp}] {$readable}\n", FILE_APPEND);
+    
+    // קובץ תור לסנכרון מול גוגל שיטס
+    $queue_file = GENERAL_DIR . '/logs_sync_queue.txt';
+    file_put_contents($queue_file, "{$readable}\n", FILE_APPEND);
+}
+
 function log_global($message) {
-    call_gsheet_api_async(['action' => 'logGlobal'], [
-        'action' => 'logGlobal',
-        'message' => $message
-    ]);
+    $file = GENERAL_DIR . '/logs.txt';
+    $timestamp = date('Y-m-d H:i:s');
+    file_put_contents($file, "[{$timestamp}] {$message}\n", FILE_APPEND);
+    
+    $queue_file = GENERAL_DIR . '/logs_sync_queue.txt';
+    file_put_contents($queue_file, "{$message}\n", FILE_APPEND);
 }
 
-// כתיבה לדוח פעולות אישי בגוגל שיטס (בשיטה אסינכרונית מהירה ללא המתנה)
 function log_user_activity($username, $type, $target, $amount) {
+    // דוח אישי מהיר בשרת
+    $file = GENERAL_DIR . "/activity_{$username}.txt";
     $date = date('d/m/Y');
     $time = date('H:i');
-    call_gsheet_api_async(['action' => 'logActivity'], [
-        'action' => 'logActivity',
-        'user' => $username,
-        'date' => $date,
-        'time' => $time,
-        'type' => $type,
-        'target' => $target,
-        'amount' => $amount
-    ]);
+    file_put_contents($file, "{$date},{$time},{$type},{$target},{$amount}\n", FILE_APPEND);
+    
+    // קובץ תור לסנכרון דוחות לגוגל שיטס
+    $queue_file = GENERAL_DIR . '/activity_sync_queue.txt';
+    file_put_contents($queue_file, "{$username}|||{$date}|||{$time}|||{$type}|||{$target}|||{$amount}\n", FILE_APPEND);
 }
 
-// כתיבה ללוג אימותים בגוגל שיטס (בשיטה אסינכרונית מהירה ללא המתנה)
 function log_verification($username, $message) {
+    $file = GENERAL_DIR . '/verifications.txt';
     $date = date('d/m/Y');
     $time = date('H:i');
-    call_gsheet_api_async(['action' => 'logVerification'], [
-        'action' => 'logVerification',
-        'user' => $username,
-        'date' => $date,
-        'time' => $time,
-        'message' => $message
-    ]);
+    file_put_contents($file, "{$date},{$time},{$username},{$message}\n", FILE_APPEND);
+    
+    // קובץ תור לסנכרון אימותים לגוגל שיטס
+    $queue_file = GENERAL_DIR . '/verifications_sync_queue.txt';
+    file_put_contents($queue_file, "{$date}|||{$time}|||{$username}|||{$message}\n", FILE_APPEND);
 }
 
 // הדמיית פונקציה חיצונית לביצוע צינתוק או אימות טלפוני
@@ -199,16 +138,13 @@ function trigger_yemot_action($action_type, $phone) {
     log_global("הופעל מנגנון חיצוני: {$action_type} עבור מספר טלפון: {$phone}");
 }
 
-// פונקציות להחזרת תשובה לימות המשיח בפורמט הנדרש
+// פונקציות להחזרת תשובה לימות המשיח
 function yemot_read($text, $var_name, $max = '', $min = '', $timeout = 10, $allowed = 'No') {
     $output = "read=t-{$text}={$var_name},yes,{$max},{$min},{$timeout},{$allowed},yes";
-    
-    // מנגנון שרשור: אם המאזין הרגע סיים להתחבר בהצלחה, נשרשר לו את הודעת ההצלחה לתוך הפקודה
     if (isset($_SESSION['just_logged_in']) && $_SESSION['just_logged_in'] === true) {
         $output = "id_list_message=t-זוהית בהצלחה.&" . $output;
         unset($_SESSION['just_logged_in']);
     }
-    
     log_response_to_local($output);
     echo $output;
     exit;
@@ -216,18 +152,15 @@ function yemot_read($text, $var_name, $max = '', $min = '', $timeout = 10, $allo
 
 function yemot_msg($text) {
     $output = "id_list_message=t-{$text}";
-    
     if (isset($_SESSION['just_logged_in']) && $_SESSION['just_logged_in'] === true) {
         $output = "id_list_message=t-זוהית בהצלחה.&" . $output;
         unset($_SESSION['just_logged_in']);
     }
-    
     log_response_to_local($output);
     echo $output;
     exit;
 }
 
-// מיפוי שלוחות תשלום עבור שלוחה 1 (עסק מוגדר מראש)
 function get_business_by_ext($ext) {
     $map = [
         '1/1' => ['account' => '9999', 'name' => 'ת"ת'],
@@ -235,6 +168,70 @@ function get_business_by_ext($ext) {
         '1'   => ['account' => '9999', 'name' => 'ת"ת']
     ];
     return isset($map[$ext]) ? $map[$ext] : ['account' => '9999', 'name' => 'ת"ת'];
+}
+
+// -----------------------------------------------------------------------------
+// מנגנון סנכרון דו-כיווני מרוכז (?sync=1) - מופעל על ידי Cron Job החיצוני
+// -----------------------------------------------------------------------------
+if (isset($_GET['sync'])) {
+    // 1. טעינת תור לוגים כלליים
+    $logs = [];
+    $logs_q = GENERAL_DIR . '/logs_sync_queue.txt';
+    if (file_exists($logs_q)) {
+        $logs = file($logs_q, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        unlink($logs_q);
+    }
+    
+    // 2. טעינת תור דוחות פעילות
+    $activities = [];
+    $act_q = GENERAL_DIR . '/activity_sync_queue.txt';
+    if (file_exists($act_q)) {
+        $activities = file($act_q, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        unlink($act_q);
+    }
+
+    // 3. טעינת תור לוגים של אימותים
+    $verifications = [];
+    $ver_q = GENERAL_DIR . '/verifications_sync_queue.txt';
+    if (file_exists($ver_q)) {
+        $verifications = file($ver_q, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        unlink($ver_q);
+    }
+
+    // 4. טעינת יתרות ששונו בטלפון לטובת עדכון גוגל שיטס
+    $balance_updates = [];
+    $accounts = get_accounts();
+    foreach ($accounts as $u => $data) {
+        $balance_updates[] = ['user' => $u, 'pass' => $data['password'], 'balance' => $data['balance']];
+    }
+
+    // ביצוע הפנייה המרוכזת לגוגל סקריפט
+    $post_payload = [
+        'action' => 'sync',
+        'logs' => $logs,
+        'activities' => $activities,
+        'verifications' => $verifications,
+        'balance_updates' => $balance_updates
+    ];
+
+    $response = call_gsheet_api(['action' => 'sync'], $post_payload);
+    $data = json_decode($response, true);
+
+    if (isset($data['status']) && $data['status'] === 'success') {
+        // עדכון קבצי השרת המקומיים במידע הטרי ביותר מגוגל שיטס
+        file_put_contents(GENERAL_DIR . '/accounts_cache.json', json_encode($data['accounts']));
+        
+        // יצירת קבצי קונפיגורציה מהירים
+        if (isset($data['configs']) && is_array($data['configs'])) {
+            foreach ($data['configs'] as $u => $cfg) {
+                file_put_contents(GENERAL_DIR . "/config_cache_{$u}.json", json_encode($config));
+            }
+        }
+        echo "OK - הסנכרון הדו-כיווני מול גוגל שיטס הושלם בהצלחה בתוך מאיות השנייה!";
+    } else {
+        echo "Error: תקשורת מול גוגל שיטס נכשלה.";
+    }
+    exit;
 }
 
 // -----------------------------------------------------------------------------
@@ -284,7 +281,6 @@ if (!isset($_SESSION['auth_user'])) {
             unset($_SESSION['login_username']);
             log_global("משתמש {$user} התחבר בהצלחה למערכת");
             
-            // הגדרת דגל "הרגע התחבר" וממשיכים הלאה ללא עצירה, כדי להציג את המשך השלוחה מיד
             $_SESSION['just_logged_in'] = true; 
         } else {
             unset($_SESSION['login_username']);
@@ -292,7 +288,6 @@ if (!isset($_SESSION['auth_user'])) {
         }
     }
     
-    // אם המשתמש טרם סיים את תהליך ההתחברות, נציג לו שוב את בקשת הסיסמה
     if (!isset($_SESSION['auth_user']) && isset($_SESSION['login_username'])) {
         yemot_read("אנא הקש את הסיסמה שלך ולסיום סולמית", "login_pass", "", "");
     }
@@ -321,9 +316,7 @@ switch ($main_ext_prefix) {
         
         if ($step === 'ext1_get_amount' && isset($_GET['amount'])) {
             $amount = floatval($_GET['amount']);
-            
-            // לפני בדיקת היתרה הרגישה, נמשוך מידע טרי כדי למנוע טעויות יתרה
-            $accounts = force_reload_accounts(); 
+            $accounts = get_accounts(); 
             $my_balance = $accounts[$user]['balance'];
             
             if ($my_balance < $amount) {
@@ -355,18 +348,14 @@ switch ($main_ext_prefix) {
                     log_verification($user, "בוצע אימות טלפוני מוצלח להעברת {$amount} שקלים ל{$biz['name']}");
                 }
                 
-                $accounts = force_reload_accounts();
+                $accounts = get_accounts();
                 $target_acc = $biz['account'];
                 
                 if (isset($accounts[$user]) && isset($accounts[$target_acc])) {
+                    // ביצוע העברה מהירה מקומית לחלוטין (0ms)
                     $accounts[$user]['balance'] -= $amount;
                     $accounts[$target_acc]['balance'] += $amount;
-                    
-                    $updates = [
-                        ['user' => $user, 'pass' => $accounts[$user]['password'], 'balance' => $accounts[$user]['balance']],
-                        ['user' => $target_acc, 'pass' => $accounts[$target_acc]['password'], 'balance' => $accounts[$target_acc]['balance']]
-                    ];
-                    save_accounts_bulk($updates);
+                    save_accounts_local($accounts);
                     
                     log_user_activity($user, "תשלום", $biz['name'], $amount);
                     log_user_activity($target_acc, "קבלה", $user, $amount);
@@ -415,7 +404,7 @@ switch ($main_ext_prefix) {
         
         if ($step === 'ext2_get_amount' && isset($_GET['amount'])) {
             $amount = floatval($_GET['amount']);
-            $accounts = force_reload_accounts();
+            $accounts = get_accounts();
             $my_balance = $accounts[$user]['balance'];
             $target_user = $_SESSION['temp_data']['target'];
             
@@ -449,16 +438,11 @@ switch ($main_ext_prefix) {
                     log_verification($user, "בוצע אימות טלפוני מוצלח להעברת {$amount} שקלים למשתמש {$target_user}");
                 }
                 
-                $accounts = force_reload_accounts();
+                $accounts = get_accounts();
                 if (isset($accounts[$user]) && isset($accounts[$target_user])) {
                     $accounts[$user]['balance'] -= $amount;
                     $accounts[$target_user]['balance'] += $amount;
-                    
-                    $updates = [
-                        ['user' => $user, 'pass' => $accounts[$user]['password'], 'balance' => $accounts[$user]['balance']],
-                        ['user' => $target_user, 'pass' => $accounts[$target_user]['password'], 'balance' => $accounts[$target_user]['balance']]
-                    ];
-                    save_accounts_bulk($updates);
+                    save_accounts_local($accounts);
                     
                     log_user_activity($user, "העברה", $target_user, $amount);
                     log_user_activity($target_user, "קבלה", $user, $amount);
@@ -486,9 +470,12 @@ switch ($main_ext_prefix) {
     // שלוחה 3: היסטוריית פעולות (ניווט מקשים)
     // ==========================================
     case '3':
-        $res = call_gsheet_api(['action' => 'getUserActivity', 'user' => $user]);
-        $activities = json_decode($res, true);
-        if (!is_array($activities)) $activities = [];
+        // משיכה מהירה ונקייה מתוך הקובץ האישי השמור בשרת (0ms)
+        $file = GENERAL_DIR . "/activity_{$user}.txt";
+        $activities = [];
+        if (file_exists($file)) {
+            $activities = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        }
         
         $activities = array_slice(array_reverse($activities), 0, 10);
         
@@ -595,11 +582,7 @@ switch ($main_ext_prefix) {
                     $new_pass = $_SESSION['temp_data']['new_pass'];
                     $accounts = get_accounts();
                     $accounts[$user]['password'] = $new_pass;
-                    
-                    $updates = [
-                        ['user' => $user, 'pass' => $new_pass, 'balance' => $accounts[$user]['balance']]
-                    ];
-                    save_accounts_bulk($updates);
+                    save_accounts_local($accounts);
                     
                     log_verification($user, "הסיסמה שונתה בהצלחה");
                     unset($_SESSION['step']);
@@ -625,7 +608,7 @@ switch ($main_ext_prefix) {
                 
                 if ($choice == '1') {
                     $config['notify_enabled'] = $config['notify_enabled'] == 1 ? 0 : 1;
-                    save_user_config($user, $config);
+                    save_user_config_local($user, $config);
                     $msg = $config['notify_enabled'] == 1 ? "שירות הצינתוקים הופעל בהצלחה." : "שירות הצינתוקים בוטל בהצלחה.";
                     unset($_SESSION['step']);
                     yemot_msg($msg);
@@ -662,7 +645,7 @@ switch ($main_ext_prefix) {
             if ($step === 'ext0_2_amount_set' && isset($_GET['new_amount'])) {
                 $config = get_user_config($user);
                 $config['notify_min_amount'] = floatval($_GET['new_amount']);
-                save_user_config($user, $config);
+                save_user_config_local($user, $config);
                 unset($_SESSION['step']);
                 yemot_msg("ההגדרה עודכנה בהצלחה.");
             }
@@ -681,7 +664,7 @@ switch ($main_ext_prefix) {
                 if (strlen($phone) >= 8 && strlen($phone) <= 9) {
                     $config = get_user_config($user);
                     $config['notify_phone'] = $phone;
-                    save_user_config($user, $config);
+                    save_user_config_local($user, $config);
                     unset($_SESSION['step']);
                     yemot_msg("המספר הוגדר בהצלחה. שימו לב! כדי לקבל צינתוק יש להירשם בשלוחה 0, 2, ואז 1.");
                 } else {
@@ -702,7 +685,7 @@ switch ($main_ext_prefix) {
                 
                 if ($choice == '1') {
                     $config['auth_enabled'] = $config['auth_enabled'] == 1 ? 0 : 1;
-                    save_user_config($user, $config);
+                    save_user_config_local($user, $config);
                     $msg = $config['auth_enabled'] == 1 ? "שיחת אימות הופעלה בהצלחה." : "שיחת אימות בוטלה בהצלחה.";
                     unset($_SESSION['step']);
                     yemot_msg($msg);
@@ -730,7 +713,7 @@ switch ($main_ext_prefix) {
             if ($step === 'ext0_3_amount_set' && isset($_GET['new_amount'])) {
                 $config = get_user_config($user);
                 $config['auth_min_amount'] = floatval($_GET['new_amount']);
-                save_user_config($user, $config);
+                save_user_config_local($user, $config);
                 unset($_SESSION['step']);
                 yemot_msg("ההגדרה עודכנה בהצלחה.");
             }
