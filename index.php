@@ -1,53 +1,53 @@
 <?php
-// הגדרת משתני ה-API
-$token = "0775311511:124578";
-$apiUrl = "https://www.call2all.co.il/ym/api/";
+// הגדרת קידוד
+header('Content-Type: text/plain; charset=utf-8');
 
-// פונקציה לשליחת בקשה ל-API
-function callYemotApi($command, $params = []) {
-    global $apiUrl, $token;
-    $params['token'] = $token;
-    $url = $apiUrl . $command . '?' . http_build_query($params);
-    $response = file_get_contents($url);
-    return json_decode($response, true);
-}
+// קבלת נתונים מהשרת
+$phone = isset($_GET['Phone']) ? $_GET['Phone'] : '';
+$read = isset($_GET['read']) ? $_GET['read'] : '';
+$step = isset($_GET['step']) ? $_GET['step'] : 'menu'; // ניהול שלבים
 
-// קבלת נתונים מהבקשה (למשל מהטלפון)
-$fromId = $_GET['from_id']; // המשתמש המעביר
-$toId = $_GET['to_id'];     // המשתמש המקבל
-$amount = (int)$_GET['amount']; // כמות הנקודות
+// לוגיקה של ניהול השיחה
+switch ($step) {
+    
+    // תפריט ראשי
+    case 'menu':
+        echo "id_list_message=t-שלום, הגעת לבנק הוירטואלי. להעברת כסף הקש 1\n";
+        echo "read=fld=action|num=1|min=1|max=1\n";
+        echo "go_to=ivr.php?step=check_action\n";
+        break;
 
-if ($amount <= 0) {
-    die("סכום לא תקין");
-}
+    // בדיקת בחירת המשתמש
+    case 'check_action':
+        if ($read == '1') {
+            echo "id_list_message=t-אנא הקש את מספר הטלפון של המשתמש אליו תרצה להעביר את הכסף\n";
+            echo "read=fld=target_phone|min=8|max=10\n"; // 8 עד 10 ספרות (כולל קידומת)
+            echo "go_to=ivr.php?step=ask_amount\n";
+        } else {
+            echo "id_list_message=t-לא נבחרה אפשרות תקינה\n";
+            echo "go_to=ivr.php?step=menu\n";
+        }
+        break;
 
-// בדיקת יתרה (בדוגמה זו נשתמש ב-points_edit לבדיקה או במודול קיים)
-// בימות המשיח, ניתן לבצע העברה ישירה באמצעות המודול points_to_other_id אם זמין
-// או בשיטה של הפחתה מהאחד והוספה לשני:
+    // בקשת סכום
+    case 'ask_amount':
+        $target_phone = $read; // המספר שהוקש בשלב הקודם נשמר ב-$read
+        echo "id_list_message=t-אנא הקש את הסכום להעברה\n";
+        echo "read=fld=amount|min=1|max=10\n";
+        // מעבירים את מספר היעד הלאה ב-URL
+        echo "go_to=ivr.php?step=finish&target_phone=$target_phone\n";
+        break;
 
-// 1. הפחתה מהמשתמש המעביר
-$sub = callYemotApi("points_edit", [
-    "id" => $fromId,
-    "amount" => -$amount,
-    "reason" => "Transfer to $toId"
-]);
-
-if ($sub['responseStatus'] == 'OK') {
-    // 2. הוספה למשתמש המקבל
-    $add = callYemotApi("points_edit", [
-        "id" => $toId,
-        "amount" => $amount,
-        "reason" => "Transfer from $fromId"
-    ]);
-
-    if ($add['responseStatus'] == 'OK') {
-        echo "ההעברה בוצעה בהצלחה!";
-    } else {
-        // אם ההוספה נכשלה, נחזיר את הנקודות למעביר
-        callYemotApi("points_edit", ["id" => $fromId, "amount" => $amount]);
-        echo "שגיאה בהוספת נקודות למקבל";
-    }
-} else {
-    echo "שגיאה: יתרה לא מספיקה או משתמש לא קיים";
+    // סיום
+    case 'finish':
+        $amount = $read;
+        $target_phone = isset($_GET['target_phone']) ? $_GET['target_phone'] : '';
+        
+        // כאן תוסיף את הלוגיקה של עדכון מסד הנתונים (SQL)
+        // לדוגמה: update_balance($phone, $target_phone, $amount);
+        
+        echo "id_list_message=t-הסכום $amount שקלים הועבר בהצלחה למספר $target_phone\n";
+        echo "hangup=yes\n";
+        break;
 }
 ?>
