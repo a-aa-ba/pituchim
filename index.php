@@ -12,7 +12,7 @@ define('STORAGE_DIR', __DIR__ . '/storage');
 define('GENERAL_DIR', STORAGE_DIR . '/general');
 
 // הגדרת קישור הגוגל סקריפט שלכם
-define('GSHEET_API_URL', 'https://script.google.com/macros/s/AKfycbxqMFnw0dOUfcyBVHsEz7Zv5onxTw33JCbPRp06z_onZMfOLb25zA3jQCHpWjd72XE/exec');
+define('GSHEET_API_URL', 'https://script.google.com/macros/s/AKfycby7NKNdKlCTpHxSs7Hu9_IAabvW0xHDI5WJJnlqr5YBCeOZtZIjgGwbCfVz5rv4C4jx/exec');
 
 // יצירת תיקיות הבסיס במידה והן לא קיימות
 if (!file_exists(GENERAL_DIR)) mkdir(GENERAL_DIR, 0777, true);
