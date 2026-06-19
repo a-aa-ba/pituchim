@@ -7,6 +7,15 @@ $call_id = isset($_GET['ApiCallId']) ? $_GET['ApiCallId'] : 'test_session';
 session_id($call_id);
 session_start();
 
+// הגדרת נתיבי תיקיות האחסון בשרת
+define('STORAGE_DIR', __DIR__ . '/storage');
+define('GENERAL_DIR', STORAGE_DIR . '/general');
+define('USERS_DIR', STORAGE_DIR . '/users');
+
+// יצירת תיקיות הבסיס במידה והן לא קיימות
+if (!file_exists(GENERAL_DIR)) mkdir(GENERAL_DIR, 0777, true);
+if (!file_exists(USERS_DIR)) mkdir(USERS_DIR, 0777, true);
+
 // -----------------------------------------------------------------------------
 // הגדרת קישור הגוגל סקריפט שלכם (נא להחליף בקישור שלכם!)
 // -----------------------------------------------------------------------------
@@ -14,12 +23,9 @@ define('GSHEET_API_URL', 'https://script.google.com/macros/s/AKfycbyutWqr3ozMwzd
 
 // פונקציית כתיבת לוג לשרת ה-Render המקומי בעברית מפורטת
 function log_response_to_local($response_string) {
-    $file = __DIR__ . '/storage/general/logs.txt';
-    if (!file_exists(dirname($file))) {
-        mkdir(dirname($file), 0777, true);
-    }
+    $file = GENERAL_DIR . '/logs.txt';
     
-    // תרגום פקודות ה-API לעברית קריאה עבור הלוגים
+    // תרגום פקודות ה-API לעברית קריאה עבור הלוגים המקומיים
     $readable = $response_string;
     if (preg_match('/read=t-([^=]+)=([^,]+)/', $response_string, $matches)) {
         $text_to_play = $matches[1];
@@ -34,7 +40,7 @@ function log_response_to_local($response_string) {
     file_put_contents($file, "[{$timestamp}] תגובת השרת שנשלחה: {$readable} (קוד גולמי: {$response_string})\n", FILE_APPEND);
 }
 
-// פונקציית תקשורת מול גוגל שיטס דרך API
+// פונקציית תקשורת רגילה (חוסמת) מול גוגל שיטס - משמשת רק לטעינת נתונים
 function call_gsheet_api($params, $post_data = null) {
     $url = GSHEET_API_URL . '?' . http_build_query($params);
     $ch = curl_init();
@@ -51,53 +57,80 @@ function call_gsheet_api($params, $post_data = null) {
     return $response;
 }
 
+// פונקציית תקשורת מהירה ולא-חוסמת (אסינכרונית) - משמשת לרישום לוגים ודוחות ללא המתנה טלפונית
+function call_gsheet_api_async($params, $post_data = null) {
+    $url = GSHEET_API_URL . '?' . http_build_query($params);
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT_MS, 600); // נותנים לגוגל חצי שנייה להתחיל לעבד, ומנתקים מגע לטובת המאזין בטלפון
+    if ($post_data !== null) {
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($post_data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    }
+    curl_exec($ch);
+    curl_close($ch);
+}
+
 // -----------------------------------------------------------------------------
-// פונקציות תקשורת נתונים עם מנגנון זיכרון מטמון (Caching)
+// פונקציות תקשורת נתונים עם מנגנון זיכרון מטמון מקומי בשרת (Caching)
 // -----------------------------------------------------------------------------
 
-// קריאת כל החשבונות מגוגל שיטס עם שמירה בזיכרון השיחה המהיר (Session)
+// קריאת כל החשבונות מקובץ מטמון מקומי (אם קיים וטרי פחות מ-3 דקות)
 function get_accounts() {
-    if (isset($_SESSION['cached_accounts']) && is_array($_SESSION['cached_accounts'])) {
-        return $_SESSION['cached_accounts'];
-    }
-    $res = call_gsheet_api(['action' => 'getAccounts']);
-    $data = json_decode($res, true);
-    if (is_array($data)) {
-        $_SESSION['cached_accounts'] = $data;
-        return $data;
-    }
-    return [];
-}
-
-// משיכת נתונים טריים מגוגל שיטס (במיוחד לפני ביצוע פעולת העברה כספית רגישה)
-function force_reload_accounts() {
-    $res = call_gsheet_api(['action' => 'getAccounts']);
-    $data = json_decode($res, true);
-    if (is_array($data)) {
-        $_SESSION['cached_accounts'] = $data;
-        return $data;
-    }
-    return [];
-}
-
-// עדכון חשבונות מרוכז - מעדכן גם את הזיכרון המקומי וגם את גוגל שיטס
-function save_accounts_bulk($updates) {
-    if (isset($_SESSION['cached_accounts'])) {
-        foreach ($updates as $update) {
-            $u = $update['user'];
-            $_SESSION['cached_accounts'][$u] = [
-                'password' => $update['pass'],
-                'balance' => $update['balance']
-            ];
+    $cache_file = GENERAL_DIR . '/accounts_cache.json';
+    $cache_lifetime = 180; // 3 דקות מטמון
+    
+    if (file_exists($cache_file) && (time() - filemtime($cache_file) < $cache_lifetime)) {
+        $data = json_decode(file_get_contents($cache_file), true);
+        if (is_array($data)) {
+            return $data;
         }
     }
+    // אם המטמון פג תוקף, נטען מחדש מגוגל
+    return force_reload_accounts();
+}
+
+// טעינה נקייה ומאולצת מגוגל שיטס ועדכון קובץ המטמון המקומי
+function force_reload_accounts() {
+    $cache_file = GENERAL_DIR . '/accounts_cache.json';
+    $res = call_gsheet_api(['action' => 'getAccounts']);
+    $data = json_decode($res, true);
+    if (is_array($data)) {
+        file_put_contents($cache_file, json_encode($data));
+        return $data;
+    }
+    return [];
+}
+
+// עדכון חשבונות מרוכז - מעדכן מיידית את המטמון המקומי ושולח עדכון לגוגל שיטס
+function save_accounts_bulk($updates) {
+    $cache_file = GENERAL_DIR . '/accounts_cache.json';
+    $cached = [];
+    if (file_exists($cache_file)) {
+        $cached = json_decode(file_get_contents($cache_file), true);
+    }
+    if (!is_array($cached)) $cached = [];
+    
+    foreach ($updates as $update) {
+        $u = $update['user'];
+        $cached[$u] = [
+            'password' => $update['pass'],
+            'balance' => $update['balance']
+        ];
+    }
+    file_put_contents($cache_file, json_encode($cached));
+    
+    // שליחה לגוגל שיטס
     call_gsheet_api(['action' => 'saveAccountsBulk'], [
         'action' => 'saveAccountsBulk',
         'updates' => $updates
     ]);
 }
 
-// קריאת הגדרות משתמש מגוגל שיטס עם שמירה בזיכרון השיחה
+// קריאת הגדרות משתמש עם מנגנון זיכרון מטמון
 function get_user_config($username) {
     if (isset($_SESSION['cached_config'][$username])) {
         return $_SESSION['cached_config'][$username];
@@ -119,25 +152,25 @@ function get_user_config($username) {
     return $default;
 }
 
-// שמירת הגדרות משתמש לגוגל שיטס ועדכון הזיכרון
+// שמירת הגדרות משתמש לגוגל שיטס ועדכון הזיכרון המקומי
 function save_user_config($username, $config) {
     $_SESSION['cached_config'][$username] = $config;
     call_gsheet_api(['action' => 'saveUserConfig'], array_merge(['action' => 'saveUserConfig', 'user' => $username], $config));
 }
 
-// כתיבה ללוג הכללי בגוגל שיטס
+// כתיבה ללוג הכללי בגוגל שיטס (בשיטה אסינכרונית מהירה ללא המתנה)
 function log_global($message) {
-    call_gsheet_api(['action' => 'logGlobal'], [
+    call_gsheet_api_async(['action' => 'logGlobal'], [
         'action' => 'logGlobal',
         'message' => $message
     ]);
 }
 
-// כתיבה לדוח פעולות אישי בגוגל שיטס
+// כתיבה לדוח פעולות אישי בגוגל שיטס (בשיטה אסינכרונית מהירה ללא המתנה)
 function log_user_activity($username, $type, $target, $amount) {
     $date = date('d/m/Y');
     $time = date('H:i');
-    call_gsheet_api(['action' => 'logActivity'], [
+    call_gsheet_api_async(['action' => 'logActivity'], [
         'action' => 'logActivity',
         'user' => $username,
         'date' => $date,
@@ -148,11 +181,11 @@ function log_user_activity($username, $type, $target, $amount) {
     ]);
 }
 
-// כתיבה ללוג אימותים בגוגל שיטס
+// כתיבה ללוג אימותים בגוגל שיטס (בשיטה אסינכרונית מהירה ללא המתנה)
 function log_verification($username, $message) {
     $date = date('d/m/Y');
     $time = date('H:i');
-    call_gsheet_api(['action' => 'logVerification'], [
+    call_gsheet_api_async(['action' => 'logVerification'], [
         'action' => 'logVerification',
         'user' => $username,
         'date' => $date,
@@ -170,7 +203,7 @@ function trigger_yemot_action($action_type, $phone) {
 function yemot_read($text, $var_name, $max = '', $min = '', $timeout = 10, $allowed = 'No') {
     $output = "read=t-{$text}={$var_name},yes,{$max},{$min},{$timeout},{$allowed},yes";
     
-    // מנגנון שרשור: אם המאזין הרגע סיים להתחבר בהצלחה, נשרשר לו את הודעת ההצלחה
+    // מנגנון שרשור: אם המאזין הרגע סיים להתחבר בהצלחה, נשרשר לו את הודעת ההצלחה לתוך הפקודה
     if (isset($_SESSION['just_logged_in']) && $_SESSION['just_logged_in'] === true) {
         $output = "id_list_message=t-זוהית בהצלחה.&" . $output;
         unset($_SESSION['just_logged_in']);
