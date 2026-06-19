@@ -8,7 +8,7 @@ session_id($call_id);
 session_start();
 
 // -----------------------------------------------------------------------------
-// הגדרת קישור הגוגל סקריפט שלכם
+// הגדרת קישור הגוגל סקריפט שלכם (נא להחליף בקישור שלכם!)
 // -----------------------------------------------------------------------------
 define('GSHEET_API_URL', 'https://script.google.com/macros/s/AKfycbyutWqr3ozMwzd9dJUxkOXkfQmVM8QS-kRCDF-bwgm7utJTFnLYtL0ndrCIVHBKj2Vw/exec');
 
@@ -18,7 +18,7 @@ function call_gsheet_api($params, $post_data = null) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true); // גוגל מבצע הפניה (Redirect) ולכן שורה זו קריטית!
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     if ($post_data !== null) {
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($post_data));
@@ -40,7 +40,7 @@ function get_accounts() {
     return is_array($data) ? $data : [];
 }
 
-// עדכון חשבונות מרוכז (משמש להעברות כספים כדי למנוע כפילויות)
+// עדכון חשבונות מרוכז
 function save_accounts_bulk($updates) {
     call_gsheet_api(['action' => 'saveAccountsBulk'], [
         'action' => 'saveAccountsBulk',
@@ -108,9 +108,9 @@ function trigger_yemot_action($action_type, $phone) {
 }
 
 // פונקציות להחזרת תשובה לימות המשיח בפורמט הנדרש
-function yemot_read($text, $var_name, $min = 1, $max = 10, $timeout = 10, $allowed = 'No') {
-    // בפורמט של ימות המשיח, סדר המספרים הוא: [מקסימום ספרות], [מינימום ספרות]
-    echo "read=t-{$text}={$var_name},yes,{$max},{$min},{$timeout},{$allowed}";
+function yemot_read($text, $var_name, $max = '', $min = '', $timeout = 10, $allowed = 'No') {
+    // בפורמט של ימות המשיח: [שם_המשתנה],[האם להחליף-yes],[מקסימום],[מינימום],[timeout],[סוג],[האם להמתין לסולמית-yes]
+    echo "read=t-{$text}={$var_name},yes,{$max},{$min},{$timeout},{$allowed},yes";
     exit;
 }
 
@@ -161,7 +161,8 @@ if (!isset($_SESSION['auth_user'])) {
             yemot_msg("שם משתמש זה אינו מופיע ברשימת המשתמשים הרשומים למערכת. לרישום למערכת יש לפנות לחדר התת בישיבה.");
         } else {
             $_SESSION['login_username'] = $entered_user;
-            yemot_read("אנא הקש את הסיסמה שלך ולסיום סולמית", "login_pass", 4, 15);
+            // מעבר לקבלת סיסמה ללא הגבלת תווים בטלפון כדי למנוע שגיאות של ימות המשיח
+            yemot_read("אנא הקש את הסיסמה שלך ולסיום סולמית", "login_pass", "", "");
         }
     }
     
@@ -184,7 +185,7 @@ if (!isset($_SESSION['auth_user'])) {
     }
     
     if (isset($_SESSION['login_username'])) {
-        yemot_read("אנא הקש את הסיסמה שלך ולסיום סולמית", "login_pass", 4, 15);
+        yemot_read("אנא הקש את הסיסמה שלך ולסיום סולמית", "login_pass", "", "");
     }
 }
 
@@ -206,7 +207,7 @@ switch ($main_ext_prefix) {
         
         if ($step === 'init') {
             $_SESSION['step'] = 'ext1_get_amount';
-            yemot_read("אנא הקש את הסכום לחיוב ולסיום סולמית", "amount");
+            yemot_read("אנא הקש את הסכום לחיוב ולסיום סולמית", "amount", 10, 1);
         }
         
         if ($step === 'ext1_get_amount' && isset($_GET['amount'])) {
@@ -227,7 +228,7 @@ switch ($main_ext_prefix) {
         if ($step === 'ext1_insufficient_retry' && isset($_GET['insufficient_choice'])) {
             if ($_GET['insufficient_choice'] == '1') {
                 $_SESSION['step'] = 'ext1_get_amount';
-                yemot_read("אנא הקש את הסכום לחיוב ולסיום סולמית", "amount");
+                yemot_read("אנא הקש את הסכום לחיוב ולסיום סולמית", "amount", 10, 1);
             } else {
                 yemot_msg("הפעולה בוטלה. שלום ותודה.");
             }
@@ -250,7 +251,6 @@ switch ($main_ext_prefix) {
                     $accounts[$user]['balance'] -= $amount;
                     $accounts[$target_acc]['balance'] += $amount;
                     
-                    // שמירה מרוכזת בגוגל שיטס
                     $updates = [
                         ['user' => $user, 'pass' => $accounts[$user]['password'], 'balance' => $accounts[$user]['balance']],
                         ['user' => $target_acc, 'pass' => $accounts[$target_acc]['password'], 'balance' => $accounts[$target_acc]['balance']]
@@ -285,7 +285,7 @@ switch ($main_ext_prefix) {
     case '2':
         if ($step === 'init') {
             $_SESSION['step'] = 'ext2_get_target';
-            yemot_read("הקש את שם המשתמש אליו הינך רוצה להעביר את הסכום המבוקש ולסיום סולמית", "target_user", 4, 10);
+            yemot_read("הקש את שם המשתמש אליו הינך רוצה להעביר את הסכום המבוקש ולסיום סולמית", "target_user", 4, 4);
         }
         
         if ($step === 'ext2_get_target' && isset($_GET['target_user'])) {
@@ -294,11 +294,11 @@ switch ($main_ext_prefix) {
             
             if (!isset($accounts[$target_user])) {
                 $_SESSION['step'] = 'ext2_get_target';
-                yemot_read("חשבון היעד לא נמצא במערכת. אנא הקש שוב את שם המשתמש להעברה", "target_user", 4, 10);
+                yemot_read("חשבון היעד לא נמצא במערכת. אנא הקש שוב את שם המשתמש להעברה", "target_user", 4, 4);
             } else {
                 $_SESSION['temp_data'] = ['target' => $target_user];
                 $_SESSION['step'] = 'ext2_get_amount';
-                yemot_read("אנא הקש את הסכום להעברה ולסיום סולמית", "amount");
+                yemot_read("אנא הקש את הסכום להעברה ולסיום סולמית", "amount", 10, 1);
             }
         }
         
@@ -321,7 +321,7 @@ switch ($main_ext_prefix) {
         if ($step === 'ext2_insufficient_retry' && isset($_GET['insufficient_choice'])) {
             if ($_GET['insufficient_choice'] == '1') {
                 $_SESSION['step'] = 'ext2_get_amount';
-                yemot_read("אנא הקש את הסכום להעברה ולסיום סולמית", "amount");
+                yemot_read("אנא הקש את הסכום להעברה ולסיום סולמית", "amount", 10, 1);
             } else {
                 yemot_msg("הפעולה בוטלה.");
             }
@@ -343,7 +343,6 @@ switch ($main_ext_prefix) {
                     $accounts[$user]['balance'] -= $amount;
                     $accounts[$target_user]['balance'] += $amount;
                     
-                    // שמירה מרוכזת בגוגל שיטס
                     $updates = [
                         ['user' => $user, 'pass' => $accounts[$user]['password'], 'balance' => $accounts[$user]['balance']],
                         ['user' => $target_user, 'pass' => $accounts[$target_user]['password'], 'balance' => $accounts[$target_user]['balance']]
@@ -376,7 +375,6 @@ switch ($main_ext_prefix) {
     // שלוחה 3: היסטוריית פעולות (ניווט מקשים)
     // ==========================================
     case '3':
-        // משיכת דוח הפעילויות של המשתמש ישירות מגוגל שיטס
         $res = call_gsheet_api(['action' => 'getUserActivity', 'user' => $user]);
         $activities = json_decode($res, true);
         if (!is_array($activities)) $activities = [];
@@ -453,7 +451,7 @@ switch ($main_ext_prefix) {
         if ($sub_ext === '0/1') {
             if ($step === 'init') {
                 $_SESSION['step'] = 'ext0_1_current_pass';
-                yemot_read("אנא הקש את הסיסמה העכשווית שלך", "current_pass");
+                yemot_read("אנא הקש את הסיסמה העכשווית שלך ולסיום סולמית", "current_pass", "", "");
             }
             
             if ($step === 'ext0_1_current_pass' && isset($_GET['current_pass'])) {
@@ -464,7 +462,7 @@ switch ($main_ext_prefix) {
                     log_verification($user, "נשלחה שיחת אימות לצורך החלפת סיסמה");
                     
                     $_SESSION['step'] = 'ext0_1_new_pass';
-                    yemot_read("הסיסמה נכונה. אנא הקש את הסיסמה החדשה, באורך 4 ספרות לפחות", "new_pass", 4, 15);
+                    yemot_read("הסיסמה נכונה. אנא הקש את הסיסמה החדשה, באורך 4 ספרות לפחות ולסיום סולמית", "new_pass", "", "");
                 } else {
                     unset($_SESSION['step']);
                     yemot_msg("הסיסמה שגויה. הפעולה מבוטלת.");
@@ -472,9 +470,13 @@ switch ($main_ext_prefix) {
             }
             
             if ($step === 'ext0_1_new_pass' && isset($_GET['new_pass'])) {
-                $_SESSION['temp_data'] = ['new_pass' => $_GET['new_pass']];
+                $new_pass = $_GET['new_pass'];
+                if (strlen($new_pass) < 4) {
+                    yemot_read("הסיסמה קצרה מדי. עליה להיות לפחות ארבע ספרות. אנא הקש סיסמה חדשה ולסיום סולמית", "new_pass", "", "");
+                }
+                $_SESSION['temp_data'] = ['new_pass' => $new_pass];
                 $_SESSION['step'] = 'ext0_1_confirm_pass';
-                yemot_read("אנא הקש את הסיסמה החדשה פעם נוספת לאימות", "new_pass_confirm", 4, 15);
+                yemot_read("אנא הקש את הסיסמה החדשה פעם נוספת לאימות ולסיום סולמית", "new_pass_confirm", "", "");
             }
             
             if ($step === 'ext0_1_confirm_pass' && isset($_GET['new_pass_confirm'])) {
@@ -483,7 +485,6 @@ switch ($main_ext_prefix) {
                     $accounts = get_accounts();
                     $accounts[$user]['password'] = $new_pass;
                     
-                    // שמירת הסיסמה החדשה לגוגל שיטס
                     $updates = [
                         ['user' => $user, 'pass' => $new_pass, 'balance' => $accounts[$user]['balance']]
                     ];
@@ -524,7 +525,7 @@ switch ($main_ext_prefix) {
                         yemot_read("הסכום המוגדר כעת הוא {$config['notify_min_amount']} שקלים. לשינוי הקש 1 ליציאה הקש 2", "change_ask", 1, 1);
                     } else {
                         $_SESSION['step'] = 'ext0_2_amount_set';
-                        yemot_read("לא מוגדר סכום לצינתוק. אנא הקש את הסכום ממנו תתחיל לקבל צינתוק בעת ביצוע עיסקה", "new_amount");
+                        yemot_read("לא מוגדר סכום לצינתוק. אנא הקש את הסכום ממנו תתחיל לקבל צינתוק בעת ביצוע עיסקה", "new_amount", 10, 1);
                     }
                 }
                 elseif ($choice == '3') {
@@ -533,7 +534,7 @@ switch ($main_ext_prefix) {
                         yemot_read("המספר המוגדר לקבלת צינתוק הינו {$config['notify_phone']}. לשינוי הקש 1 ליציאה הקש 2", "change_ask", 1, 1);
                     } else {
                         $_SESSION['step'] = 'ext0_2_phone_set';
-                        yemot_read("לא מוגדר מספר. אנא הקש את המספר אליו יצנתק בעת ביצוע עיסקה במערכת. מינימום שמונה ספרות מקסימום תשע", "new_phone", 8, 9);
+                        yemot_read("לא מוגדר מספר. אנא הקש את המספר אליו יצנתק בעת ביצוע עיסקה במערכת. מינימום שמונה ספרות מקסימום תשע", "new_phone", 9, 8);
                     }
                 }
             }
@@ -541,7 +542,7 @@ switch ($main_ext_prefix) {
             if ($step === 'ext0_2_amount_ask' && isset($_GET['change_ask'])) {
                 if ($_GET['change_ask'] == '1') {
                     $_SESSION['step'] = 'ext0_2_amount_set';
-                    yemot_read("אנא הקש את הסכום ממנו תתחיל לקבל צינתוק בעת ביצוע עיסקה", "new_amount");
+                    yemot_read("אנא הקש את הסכום ממנו תתחיל לקבל צינתוק בעת ביצוע עיסקה", "new_amount", 10, 1);
                 } else {
                     unset($_SESSION['step']);
                     yemot_msg("הפעולה בוטלה.");
@@ -558,7 +559,7 @@ switch ($main_ext_prefix) {
             if ($step === 'ext0_2_phone_ask' && isset($_GET['change_ask'])) {
                 if ($_GET['change_ask'] == '1') {
                     $_SESSION['step'] = 'ext0_2_phone_set';
-                    yemot_read("אנא הקש את המספר אליו יצנתק בעת ביצוע עיסקה במערכת", "new_phone", 8, 9);
+                    yemot_read("אנא הקש את המספר אליו יצנתק בעת ביצוע עיסקה במערכת", "new_phone", 9, 8);
                 } else {
                     unset($_SESSION['step']);
                     yemot_msg("הפעולה בוטלה.");
@@ -573,7 +574,7 @@ switch ($main_ext_prefix) {
                     unset($_SESSION['step']);
                     yemot_msg("המספר הוגדר בהצלחה. שימו לב! כדי לקבל צינתוק יש להירשם בשלוחה 0, 2, ואז 1.");
                 } else {
-                    yemot_read("מספר לא תקין. אנא הקש את המספר מחדש, שמונה או תשע ספרות", "new_phone", 8, 9);
+                    yemot_read("מספר לא תקין. אנא הקש את המספר מחדש, שמונה או תשע ספרות", "new_phone", 9, 8);
                 }
             }
         }
@@ -601,7 +602,7 @@ switch ($main_ext_prefix) {
                         yemot_read("הסכום המוגדר הוא {$config['auth_min_amount']} שקלים. לשינוי הקש 1 ליציאה הקש 2", "change_ask", 1, 1);
                     } else {
                         $_SESSION['step'] = 'ext0_3_amount_set';
-                        yemot_read("לא מוגדר סכום לשיחת אימות. אנא הקש את הסכום ממנו תתחיל לקבל שיחת אימות בעת ביצוע עיסקה", "new_amount");
+                        yemot_read("לא מוגדר סכום לשיחת אימות. אנא הקש את הסכום ממנו תתחיל לקבל שיחת אימות בעת ביצוע עיסקה", "new_amount", 10, 1);
                     }
                 }
             }
@@ -609,7 +610,7 @@ switch ($main_ext_prefix) {
             if ($step === 'ext0_3_amount_ask' && isset($_GET['change_ask'])) {
                 if ($_GET['change_ask'] == '1') {
                     $_SESSION['step'] = 'ext0_3_amount_set';
-                    yemot_read("אנא הקש את הסכום ממנו תתחיל לקבל שיחת אימות בעת ביצוע עיסקה", "new_amount");
+                    yemot_read("אנא הקש את הסכום ממנו תתחיל לקבל שיחת אימות בעת ביצוע עיסקה", "new_amount", 10, 1);
                 } else {
                     unset($_SESSION['step']);
                     yemot_msg("הפעולה בוטלה.");
