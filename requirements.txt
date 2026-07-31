@@ -3,3 +3,5 @@ uvicorn
 requests
 python-multipart
 SpeechRecognition
+pydub
+imageio-ffmpeg
