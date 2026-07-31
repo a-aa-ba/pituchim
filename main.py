@@ -11,9 +11,6 @@ from fastapi.responses import Response
 import imageio_ffmpeg
 import speech_recognition as sr
 
-# הגדרת pydub להשתמש בממיר ffmpeg המובנה
-AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
-
 app = FastAPI(title="Yemot Sales IVR System")
 
 # הגדרות סליקה וטוקן
