@@ -18,20 +18,38 @@ CACHE = {
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
-SYSTEM_PARAMS = {
-    "ApiCallId", "ApiPhone", "ApiDID", "ApiRealDID", 
-    "ApiExtension", "ApiTime", "ApiYFCallId", "ApiEnterID", "ApiEnterIDName"
+# מפת משתנים ממוקדת לכל שלב בשיחה
+STEP_PARAM_MAP = {
+    "AUTH": ["auth_id", "ApiRealAnswer"],
+    "NOT_AUTHORIZED_CHOICE": ["unauth_choice", "ApiRealAnswer"],
+    "MAIN_MENU": ["cat_choice", "ApiRealAnswer"],
+    "KASHRUT_MENU": ["kashruts_choice", "kashrut_choice", "ApiRealAnswer"],
+    "PRODUCT_LOOP": ["product_choice", "ApiRealAnswer"],
+    "QTY_INPUT": ["qty_input", "ApiRealAnswer"],
+    "CONFIRM_ORDER": ["confirm_choice", "ApiRealAnswer"],
+    "AFTER_ADD_MENU": ["after_add_choice", "ApiRealAnswer"]
 }
+
+def clean_input(val: str) -> str:
+    """ניקוי תווי לוואי מהקשת המשתמש (כמו #, *, Digits-)"""
+    if not val:
+        return ""
+    val = str(val).strip()
+    val = val.replace("#", "").replace("*", "")
+    if val.startswith("Digits-"):
+        val = val.replace("Digits-", "")
+    return val.strip()
 
 def clean_tts(text: str) -> str:
     """מנקה תווי הפרדה שעלולים לשבור את ה-Parser של ימות המשיח"""
     if not text:
         return ""
-    text = text.replace(".", " ") # נקודה מפצלת הודעות בימות
-    text = text.replace("-", " ") # מקף משמש למבנה הפקודה
-    text = text.replace('"', "")  # מחיקת מירכאות
-    text = text.replace("'", "")  # מחיקת גרשיים
-    text = text.replace("=", " ") # מחיקת שווה
+    text = str(text)
+    text = text.replace(".", " ")
+    text = text.replace("-", " ")
+    text = text.replace('"', "")
+    text = text.replace("'", "")
+    text = text.replace("=", " ")
     return text.strip()
 
 def get_field(item: dict, *keys, default=""):
@@ -169,13 +187,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     call_id = params.get("ApiCallId") or params.get("phone") or "default_session"
     phone = params.get("ApiPhone", "").strip()
     
-    # חילוץ קלט המשתמש מכל פרמטר שאינו פרמטר מערכת
-    user_input = ""
-    for k, v in params.items():
-        if k not in SYSTEM_PARAMS and v:
-            user_input = str(v).strip()
-            break
-    
     if call_id not in SESSIONS:
         SESSIONS[call_id] = {
             "step": "AUTH", "user": None, "cart": [], "selected_cat": None,
@@ -186,6 +197,22 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         
     session = SESSIONS[call_id]
     step = session["step"]
+    
+    # חילוץ קלט המשתמש לפי השלב הנוכחי בשיחה
+    user_input = ""
+    expected_keys = STEP_PARAM_MAP.get(step, [])
+    for key in expected_keys:
+        if params.get(key):
+            user_input = str(params.get(key)).strip()
+            break
+            
+    if not user_input:
+        for k, v in params.items():
+            if not k.startswith("Api") and v:
+                user_input = str(v).strip()
+                break
+                
+    user_input = clean_input(user_input)
     
     # ---------------------------------------------------------
     # שלב 1: זיהוי מורשים
@@ -341,12 +368,15 @@ async def show_categories(session: dict, prefix: str = "") -> Response:
     return yemot_read(text, "cat_choice", max_digits=1, min_digits=1)
 
 def start_product_loop(session: dict) -> Response:
-    cat = session["selected_cat"]
-    kashrut = session["selected_kashrut"]
+    cat = str(session.get("selected_cat", "")).strip()
+    kashrut = session.get("selected_kashrut")
+    if kashrut:
+        kashrut = str(kashrut).strip()
+        
     filtered = [
         p for p in CACHE["products"]
-        if str(p.get("category_name")).strip() == cat
-        and (kashrut is None or str(p.get("kashrut")).strip() == kashrut)
+        if str(p.get("category_name", "")).strip().lower() == cat.lower()
+        and (not kashrut or str(p.get("kashrut", "")).strip().lower() == kashrut.lower())
     ]
     if not filtered:
         session["step"] = "MAIN_MENU"
