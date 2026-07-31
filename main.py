@@ -1,20 +1,20 @@
-import io
 import os
+import io
 import json
 import requests
-import speech_recognition as sr
-from pydub import AudioSegment
-import imageio_ffmpeg
+import subprocess
+import traceback
 from datetime import datetime
 from typing import Dict, Any
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import Response
-
-# הגדרת pydub להשתמש בממיר ffmpeg המובנה
-AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+import imageio_ffmpeg
+import speech_recognition as sr
 
 app = FastAPI(title="Yemot Sales IVR System")
 
+# הגדרת טוקן ימות המשיח וקישור Google Sheets
+YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
 CACHE = {
@@ -29,13 +29,13 @@ STEP_PARAM_MAP = {
     "WELCOME": ["welcome_choice", "ApiRealAnswer"],
     "AUTH": ["auth_id", "ApiRealAnswer"],
     "NOT_AUTHORIZED_CHOICE": ["unauth_choice", "ApiRealAnswer"],
-    "REG_NAME": ["reg_name", "ApiRealAnswer"],
+    "REG_NAME": ["reg_name", "my_rec", "ApiRealAnswer"],
     "CONFIRM_REG_NAME": ["confirm_reg_name", "ApiRealAnswer"],
     "REG_ID": ["reg_id", "ApiRealAnswer"],
     "CONFIRM_REG_ID": ["confirm_reg_id", "ApiRealAnswer"],
     "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
     "CONFIRM_REG_PHONE": ["confirm_reg_phone", "ApiRealAnswer"],
-    "REG_ADDRESS": ["reg_address", "ApiRealAnswer"],
+    "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
     "CONFIRM_REG_ADDRESS": ["confirm_reg_address", "ApiRealAnswer"],
     "MAIN_MENU": ["cat_choice", "ApiRealAnswer"],
     "KASHRUT_MENU": ["kashrut_choice", "ApiRealAnswer"],
@@ -45,39 +45,97 @@ STEP_PARAM_MAP = {
     "AFTER_ADD_MENU": ["after_add_choice", "ApiRealAnswer"]
 }
 
-def transcribe_hebrew_audio(audio_path_or_url: str) -> str:
-    """הורדת קובץ השמע, המרתו ל-PCM WAV בזיכרון ותמלול חינמי בעברית"""
-    if not audio_path_or_url:
+# -------------------------------------------------------------------
+# 1. המרת שמע + פילטרים לניקוי רעשים ואיזון עוצמה (FFmpeg)
+# -------------------------------------------------------------------
+def convert_audio_to_pcm_wav(input_path, output_path):
+    """
+    המרה ל-WAV 16kHz תקני + הפעלת פילטרים לניקוי רעשים והגברת דיבור חלש
+    """
+    try:
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        audio_filters = "highpass=f=200,lowpass=f=3400,afftdn,dynaudnorm"
+
+        cmd = [
+            ffmpeg_exe, "-y",
+            "-i", input_path,
+            "-af", audio_filters,
+            "-ar", "16000",
+            "-ac", "1",
+            "-f", "wav",
+            output_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        print("LOG: הקובץ הומרה ונוקה בהצלחה דרך FFmpeg", flush=True)
+        return True
+    except Exception as e:
+        print(f"LOG ERROR בהמרת FFmpeg: {e}", flush=True)
+        return False
+
+# -------------------------------------------------------------------
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית
+# -------------------------------------------------------------------
+def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
+    """הורדת הקובץ מימות המשיח דרך ה-API, ניקוי רעשים ותמלול בעברית"""
+    if not my_rec_path or not isinstance(my_rec_path, str):
         return ""
-        
-    if not audio_path_or_url.startswith("http"):
-        audio_url = "https://f2.freeivr.co.il/files/" + audio_path_or_url.lstrip("/")
-    else:
-        audio_url = audio_path_or_url
+
+    active_token = token or YEMOT_TOKEN
+    clean_path = my_rec_path.strip()
+    if not clean_path.startswith('/'):
+        clean_path = '/' + clean_path
+
+    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
+    print(f"LOG: מוריד קובץ שמע מ: {audio_url}", flush=True)
+
+    temp_audio = f"downloaded_{os.getpid()}.file"
+    converted_wav = f"converted_{os.getpid()}.wav"
 
     try:
-        # 1. הורדת הקובץ מימות המשיח
-        response = requests.get(audio_url, timeout=10)
-        
-        # 2. המרה של הקובץ הדחוס (GSM/u-law) ל-PCM WAV לא-דחוס בזיכרון
-        audio = AudioSegment.from_file(io.BytesIO(response.content))
-        pcm_wav_bytes = io.BytesIO()
-        audio.export(pcm_wav_bytes, format="wav")
-        pcm_wav_bytes.seek(0)
-        
-        # 3. תמלול הקובץ בעברית בחינם
-        r = sr.Recognizer()
-        with sr.AudioFile(pcm_wav_bytes) as source:
-            audio_data = r.record(source)
-            text = r.recognize_google(audio_data, language="he-IL")
-            print(f" Transcribed text: {text}")
-            return text.strip()
-    except Exception as e:
-        print(f" Error transcribing audio: {e}")
-        return ""
+        res = requests.get(audio_url, timeout=30)
+        print(f"LOG: סטטוס הורדה: {res.status_code}, גודל: {len(res.content)} bytes", flush=True)
 
+        if res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
+            print(f"LOG ERROR: הורדת קובץ נכשלה. תגובת ימות המשיח: {res.text[:200]}", flush=True)
+            return ""
+
+        with open(temp_audio, "wb") as f:
+            f.write(res.content)
+
+        # ניקוי רעשים והמרה
+        if not convert_audio_to_pcm_wav(temp_audio, converted_wav):
+            target_wav = temp_audio
+        else:
+            target_wav = converted_wav
+
+        # תמלול מול גוגל
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(target_wav) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data, language='he-IL')
+
+        transcribed = text.strip() if text else ""
+        print(f"LOG: תמליל סופי: {transcribed}", flush=True)
+        return transcribed
+
+    except sr.UnknownValueError:
+        print("LOG WARNING: גוגל לא הצליח לזהות מילים בהקלטה זו", flush=True)
+        return ""
+    except Exception as e:
+        print(f"LOG ERROR בתמלול: {e}", flush=True)
+        return ""
+    finally:
+        if os.path.exists(temp_audio):
+            try: os.remove(temp_audio)
+            except: pass
+        if os.path.exists(converted_wav):
+            try: os.remove(converted_wav)
+            except: pass
+
+# -------------------------------------------------------------------
+# 3. פונקציות עזר לניקוי וטעינת נתונים
+# -------------------------------------------------------------------
 def clean_input(val: str) -> str:
-    """ניקוי תווי לוואי מהקשת המשתמש"""
     if not val:
         return ""
     val = str(val).strip()
@@ -87,7 +145,6 @@ def clean_input(val: str) -> str:
     return val.strip()
 
 def clean_tts(text: str) -> str:
-    """מנקה תווי הפרדה שעלולים לשבור את ה-Parser של ימות המשיח"""
     if not text:
         return ""
     text = str(text)
@@ -145,9 +202,9 @@ def load_data_from_sheets():
                     "kashrut": get_field(p, "כשרות", "kashrut")
                 })
         CACHE["products"] = prods
-        print(" Data successfully reloaded from Sheets!")
+        print(" Data successfully reloaded from Sheets!", flush=True)
     except Exception as e:
-        print(f" Error loading data: {e}")
+        print(f" Error loading data: {e}", flush=True)
 
 @app.on_event("startup")
 async def startup_event():
@@ -184,7 +241,7 @@ def save_new_user_to_sheet(user_data: dict):
             "address": str(user_data.get("address", ""))
         }
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-        print(" New user registered to Sheet!")
+        print(" New user registered to Sheet!", flush=True)
     except Exception as e: print(f" Error registering user: {e}")
 
 def log_transaction_to_sheet(session_data: dict):
@@ -217,10 +274,10 @@ def yemot_read(text: str, var_name: str, max_digits=10, min_digits=1, sec=7, sec
     content = f"read=t-{clean_text}={var_name},no,{max_digits},{min_digits},{sec},{sec_type},no,no,*/"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-def yemot_read_record(text: str, var_name: str, sec=10) -> Response:
-    """הוראת הקלטה חינמית מימות המשיח לקובץ שמע"""
+def yemot_read_record(text: str, var_name: str) -> Response:
+    """בקשת הקלטה מימות המשיח"""
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},no,record,/ApiRecord,file_name,no,yes,yes,2,{sec}"
+    content = f"read=t-{clean_text}={var_name},no,record"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
@@ -228,6 +285,9 @@ def yemot_msg(text: str) -> Response:
     content = f"id_list_message=t-{clean_text}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
+# -------------------------------------------------------------------
+# 4. Webhook ראשי
+# -------------------------------------------------------------------
 @app.api_route("/", methods=["GET", "POST", "HEAD"])
 async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
@@ -240,6 +300,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         
     call_id = params.get("ApiCallId") or params.get("phone") or "default_session"
     phone = params.get("ApiPhone", "").strip()
+    token = params.get("token") or YEMOT_TOKEN
     
     if call_id not in SESSIONS:
         SESSIONS[call_id] = {
@@ -322,9 +383,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not raw_user_input:
             return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
         
-        transcribed_text = transcribe_hebrew_audio(raw_user_input)
+        transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
         if not transcribed_text:
-            return yemot_read_record("לא הצלחנו לפענח את הדיבור, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
+            return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
             
         session["reg_data"]["first_name"] = transcribed_text
         session["step"] = "CONFIRM_REG_NAME"
@@ -376,9 +437,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not raw_user_input:
             return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address")
             
-        transcribed_text = transcribe_hebrew_audio(raw_user_input)
+        transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
         if not transcribed_text:
-            return yemot_read_record("לא הצלחנו לפענח את הדיבור, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address")
+            return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address")
 
         session["reg_data"]["address"] = transcribed_text
         session["step"] = "CONFIRM_REG_ADDRESS"
