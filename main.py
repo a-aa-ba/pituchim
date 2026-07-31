@@ -1,11 +1,17 @@
+import io
 import os
 import json
 import requests
 import speech_recognition as sr
+from pydub import AudioSegment
+import imageio_ffmpeg
 from datetime import datetime
 from typing import Dict, Any
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import Response
+
+# הגדרת pydub להשתמש בממיר ffmpeg המובנה
+AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
 app = FastAPI(title="Yemot Sales IVR System")
 
@@ -40,25 +46,28 @@ STEP_PARAM_MAP = {
 }
 
 def transcribe_hebrew_audio(audio_path_or_url: str) -> str:
-    """הורדת קובץ השמע מימות המשיח ותמלול חינמי בעברית"""
+    """הורדת קובץ השמע, המרתו ל-PCM WAV בזיכרון ותמלול חינמי בעברית"""
     if not audio_path_or_url:
         return ""
         
-    # אם התקבל קישור יחסי מימות המשיח, נהפוך אותו לקישור מלא
     if not audio_path_or_url.startswith("http"):
         audio_url = "https://f2.freeivr.co.il/files/" + audio_path_or_url.lstrip("/")
     else:
         audio_url = audio_path_or_url
 
     try:
-        r = sr.Recognizer()
+        # 1. הורדת הקובץ מימות המשיח
         response = requests.get(audio_url, timeout=10)
-        temp_filename = "temp_recording.wav"
         
-        with open(temp_filename, "wb") as f:
-            f.write(response.content)
-            
-        with sr.AudioFile(temp_filename) as source:
+        # 2. המרה של הקובץ הדחוס (GSM/u-law) ל-PCM WAV לא-דחוס בזיכרון
+        audio = AudioSegment.from_file(io.BytesIO(response.content))
+        pcm_wav_bytes = io.BytesIO()
+        audio.export(pcm_wav_bytes, format="wav")
+        pcm_wav_bytes.seek(0)
+        
+        # 3. תמלול הקובץ בעברית בחינם
+        r = sr.Recognizer()
+        with sr.AudioFile(pcm_wav_bytes) as source:
             audio_data = r.record(source)
             text = r.recognize_google(audio_data, language="he-IL")
             print(f" Transcribed text: {text}")
@@ -68,6 +77,7 @@ def transcribe_hebrew_audio(audio_path_or_url: str) -> str:
         return ""
 
 def clean_input(val: str) -> str:
+    """ניקוי תווי לוואי מהקשת המשתמש"""
     if not val:
         return ""
     val = str(val).strip()
@@ -77,6 +87,7 @@ def clean_input(val: str) -> str:
     return val.strip()
 
 def clean_tts(text: str) -> str:
+    """מנקה תווי הפרדה שעלולים לשבור את ה-Parser של ימות המשיח"""
     if not text:
         return ""
     text = str(text)
@@ -311,7 +322,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not raw_user_input:
             return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
         
-        # תמלול חינמי בשרת
         transcribed_text = transcribe_hebrew_audio(raw_user_input)
         if not transcribed_text:
             return yemot_read_record("לא הצלחנו לפענח את הדיבור, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
