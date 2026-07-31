@@ -11,11 +11,19 @@ from fastapi.responses import Response
 import imageio_ffmpeg
 import speech_recognition as sr
 
+# הגדרת pydub להשתמש בממיר ffmpeg המובנה
+AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+
 app = FastAPI(title="Yemot Sales IVR System")
 
-# הגדרת טוקן ימות המשיח וקישור Google Sheets
+# הגדרות סליקה וטוקן
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
+
+CREDIT_CARD_PROVIDER = "nedarim_plus"
+CREDIT_CARD_REGISTER_NO = "4001388"
+CREDIT_CARD_MAX_PAYMENTS = "1"
+CREDIT_CARD_CURRENCY = "1"
 
 CACHE = {
     "users": {},
@@ -32,16 +40,13 @@ STEP_PARAM_MAP = {
     "REG_NAME": ["reg_name", "my_rec", "ApiRealAnswer"],
     "CONFIRM_REG_NAME": ["confirm_reg_name", "ApiRealAnswer"],
     "REG_ID": ["reg_id", "ApiRealAnswer"],
-    "CONFIRM_REG_ID": ["confirm_reg_id", "ApiRealAnswer"],
     "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
-    "CONFIRM_REG_PHONE": ["confirm_reg_phone", "ApiRealAnswer"],
     "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
     "CONFIRM_REG_ADDRESS": ["confirm_reg_address", "ApiRealAnswer"],
     "MAIN_MENU": ["cat_choice", "ApiRealAnswer"],
     "KASHRUT_MENU": ["kashrut_choice", "ApiRealAnswer"],
     "PRODUCT_LOOP": ["product_choice", "ApiRealAnswer"],
     "QTY_INPUT": ["qty_input", "ApiRealAnswer"],
-    "CONFIRM_ORDER": ["confirm_choice", "ApiRealAnswer"],
     "AFTER_ADD_MENU": ["after_add_choice", "ApiRealAnswer"]
 }
 
@@ -49,9 +54,6 @@ STEP_PARAM_MAP = {
 # 1. המרת שמע + פילטרים לניקוי רעשים ואיזון עוצמה (FFmpeg)
 # -------------------------------------------------------------------
 def convert_audio_to_pcm_wav(input_path, output_path):
-    """
-    המרה ל-WAV 16kHz תקני + הפעלת פילטרים לניקוי רעשים והגברת דיבור חלש
-    """
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         audio_filters = "highpass=f=200,lowpass=f=3400,afftdn,dynaudnorm"
@@ -66,7 +68,6 @@ def convert_audio_to_pcm_wav(input_path, output_path):
             output_path
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        print("LOG: הקובץ הומרה ונוקה בהצלחה דרך FFmpeg", flush=True)
         return True
     except Exception as e:
         print(f"LOG ERROR בהמרת FFmpeg: {e}", flush=True)
@@ -76,7 +77,6 @@ def convert_audio_to_pcm_wav(input_path, output_path):
 # 2. הורדת הקובץ מימות המשיח + תמלול בעברית
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
-    """הורדת הקובץ מימות המשיח דרך ה-API, ניקוי רעשים ותמלול בעברית"""
     if not my_rec_path or not isinstance(my_rec_path, str):
         return ""
 
@@ -86,41 +86,30 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         clean_path = '/' + clean_path
 
     audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
-    print(f"LOG: מוריד קובץ שמע מ: {audio_url}", flush=True)
 
     temp_audio = f"downloaded_{os.getpid()}.file"
     converted_wav = f"converted_{os.getpid()}.wav"
 
     try:
         res = requests.get(audio_url, timeout=30)
-        print(f"LOG: סטטוס הורדה: {res.status_code}, גודל: {len(res.content)} bytes", flush=True)
-
         if res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
-            print(f"LOG ERROR: הורדת קובץ נכשלה. תגובת ימות המשיח: {res.text[:200]}", flush=True)
             return ""
 
         with open(temp_audio, "wb") as f:
             f.write(res.content)
 
-        # ניקוי רעשים והמרה
         if not convert_audio_to_pcm_wav(temp_audio, converted_wav):
             target_wav = temp_audio
         else:
             target_wav = converted_wav
 
-        # תמלול מול גוגל
         recognizer = sr.Recognizer()
         with sr.AudioFile(target_wav) as source:
             audio_data = recognizer.record(source)
             text = recognizer.recognize_google(audio_data, language='he-IL')
 
-        transcribed = text.strip() if text else ""
-        print(f"LOG: תמליל סופי: {transcribed}", flush=True)
-        return transcribed
+        return text.strip() if text else ""
 
-    except sr.UnknownValueError:
-        print("LOG WARNING: גוגל לא הצליח לזהות מילים בהקלטה זו", flush=True)
-        return ""
     except Exception as e:
         print(f"LOG ERROR בתמלול: {e}", flush=True)
         return ""
@@ -163,7 +152,6 @@ def get_field(item: dict, *keys, default=""):
 
 def load_data_from_sheets():
     if not APPS_SCRIPT_URL:
-        print(" Error: APPS_SCRIPT_URL variable is missing!")
         return
         
     try:
@@ -202,7 +190,6 @@ def load_data_from_sheets():
                     "kashrut": get_field(p, "כשרות", "kashrut")
                 })
         CACHE["products"] = prods
-        print(" Data successfully reloaded from Sheets!", flush=True)
     except Exception as e:
         print(f" Error loading data: {e}", flush=True)
 
@@ -227,7 +214,7 @@ def log_general_event(call_id: str, phone: str, event_type: str, details: str):
             "details": details
         }
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-    except Exception as e: print(f" Error logging general event: {e}")
+    except Exception as e: pass
 
 def save_new_user_to_sheet(user_data: dict):
     if not APPS_SCRIPT_URL: return
@@ -241,8 +228,7 @@ def save_new_user_to_sheet(user_data: dict):
             "address": str(user_data.get("address", ""))
         }
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-        print(" New user registered to Sheet!", flush=True)
-    except Exception as e: print(f" Error registering user: {e}")
+    except Exception as e: pass
 
 def log_transaction_to_sheet(session_data: dict):
     if not APPS_SCRIPT_URL: return
@@ -264,10 +250,10 @@ def log_transaction_to_sheet(session_data: dict):
             "user_name": f"{first_name} {last_name}".strip(),
             "items_detail": items_summary,
             "total_amount": total_sum,
-            "status": "אושר"
+            "status": "אומת לפני סליקה"
         }
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-    except Exception as e: print(f" Error logging transaction: {e}")
+    except Exception as e: pass
 
 def yemot_read(text: str, var_name: str, max_digits=10, min_digits=1, sec=7, sec_type="Number") -> Response:
     clean_text = clean_tts(text)
@@ -275,7 +261,6 @@ def yemot_read(text: str, var_name: str, max_digits=10, min_digits=1, sec=7, sec
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_read_record(text: str, var_name: str) -> Response:
-    """בקשת הקלטה מימות המשיח"""
     clean_text = clean_tts(text)
     content = f"read=t-{clean_text}={var_name},no,record"
     return Response(content=content, media_type="text/plain; charset=utf-8")
@@ -329,7 +314,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     user_input = clean_input(raw_user_input)
     
     # ---------------------------------------------------------
-    # שלב פתיחה: בחירת כניסה או רישום
+    # שלב פתיחה
     # ---------------------------------------------------------
     if step == "WELCOME":
         if not user_input:
@@ -337,7 +322,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 session["user"] = CACHE["users"][phone]
                 session["step"] = "MAIN_MENU"
                 background_tasks.add_task(log_general_event, call_id, phone, "זיהוי אוטומטי", f"זוהה לפי טלפון {phone}")
-                return await show_categories(session, prefix="שלום, ברוכים הבאים, ")
+                return await show_categories(session, prefix="שלום ברוכים הבאים, ")
             return yemot_read("שלום וברוכים הבאים למערכת ההזמנות, לכניסה למערכת הקישו 1, לרישום למערכת הקישו 2", "welcome_choice", max_digits=1, min_digits=1)
         
         if user_input == "1":
@@ -377,7 +362,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
 
     # ---------------------------------------------------------
-    # תהליך הרשמה (הקלטה חינמית + תמלול בשרת)
+    # תהליך הרשמה (ללא חזרות מיותרות)
     # ---------------------------------------------------------
     elif step == "REG_NAME":
         if not raw_user_input:
@@ -407,31 +392,17 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", max_digits=9, min_digits=8)
             
         session["reg_data"]["id_number"] = user_input
-        session["step"] = "CONFIRM_REG_ID"
-        return yemot_read(f"מספר תעודת הזהות שהקשתם הוא {user_input}, לאישור הקישו 1, להקשה מחדש הקישו 2", "confirm_reg_id", max_digits=1, min_digits=1)
-
-    elif step == "CONFIRM_REG_ID":
-        if user_input == "1":
-            session["step"] = "REG_PHONE"
-            return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
-        else:
-            session["step"] = "REG_ID"
-            return yemot_read("אנא הקישו מחדש את מספר תעודת הזהות ולאחר מכן הקישו סולמית", "reg_id", max_digits=9, min_digits=8)
+        # מעבר ישיר לטלפון ללא הקראת ת.ז מחדש
+        session["step"] = "REG_PHONE"
+        return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
 
     elif step == "REG_PHONE":
         if not user_input:
             return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
         session["reg_data"]["phone"] = user_input
-        session["step"] = "CONFIRM_REG_PHONE"
-        return yemot_read(f"מספר הטלפון שהקשתם הוא {user_input}, לאישור הקישו 1, להקשה מחדש הקישו 2", "confirm_reg_phone", max_digits=1, min_digits=1)
-
-    elif step == "CONFIRM_REG_PHONE":
-        if user_input == "1":
-            session["step"] = "REG_ADDRESS"
-            return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address")
-        else:
-            session["step"] = "REG_PHONE"
-            return yemot_read("אנא הקישו מחדש את מספר הטלפון ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
+        # מעבר ישיר לכתובת ללא הקראת טלפון מחדש
+        session["step"] = "REG_ADDRESS"
+        return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address")
 
     elif step == "REG_ADDRESS":
         if not raw_user_input:
@@ -490,7 +461,8 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     session["selected_kashrut"] = None
                     return start_product_loop(session)
                 
-                k_text = f"בחרת בקטגוריית {selected_cat['category_name']}, "
+                # ללא השמעת "בחרת בקטגוריית X"
+                k_text = ""
                 for i, k in enumerate(kashruts, 1):
                     k_text += f"לכשרות {k} הקישו {i}, "
                 return yemot_read(k_text, "kashrut_choice", max_digits=1, min_digits=1)
@@ -541,36 +513,28 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return play_current_product(session, prefix="הקשה שגויה, ")
 
     # ---------------------------------------------------------
-    # שלב 5: הזנת כמות
+    # שלב 5: הזנת כמות (הוספה מידית לסל ללא אישור כפול)
     # ---------------------------------------------------------
     elif step == "QTY_INPUT":
         try:
             qty = int(user_input)
             if qty <= 0:
                 return yemot_read("כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה", "qty_input", max_digits=3, min_digits=1)
+            
             p = session["filtered_products"][session["product_index"]]
             total_price = qty * float(p["price"])
-            session["pending_qty"] = qty
-            session["pending_total"] = total_price
-            session["step"] = "CONFIRM_ORDER"
-            msg = f"בחרת להזמין {qty} יחידות ממוצר {p['name']}, העלות הכוללת היא {int(total_price)} שקלים, לאישור הקישו 1, לביטול הקישו 2"
-            return yemot_read(msg, "confirm_choice", max_digits=1, min_digits=1)
-        except ValueError:
-            return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד", "qty_input", max_digits=3, min_digits=1)
-
-    elif step == "CONFIRM_ORDER":
-        if user_input == "1":
-            p = session["filtered_products"][session["product_index"]]
+            
+            # הוספה מיידית לסל הקניות
             session["cart"].append({
-                "sku": p["sku"], "name": p["name"], "qty": session["pending_qty"], "total": session["pending_total"]
+                "sku": p["sku"], "name": p["name"], "qty": qty, "total": total_price
             })
-            background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"נוסף {p['name']} כמות {session['pending_qty']}")
+            background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"נוסף {p['name']} כמות {qty}")
+            
             session["step"] = "AFTER_ADD_MENU"
             msg = "המוצר נוסף בהצלחה לסל הקניות שלך, למוצר הבא הקישו 1, למעבר לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9"
             return yemot_read(msg, "after_add_choice", max_digits=1, min_digits=1)
-        else:
-            session["step"] = "PRODUCT_LOOP"
-            return play_current_product(session, prefix="ההזמנה בוטלה, ")
+        except ValueError:
+            return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד", "qty_input", max_digits=3, min_digits=1)
 
     elif step == "AFTER_ADD_MENU":
         if user_input == "1":
@@ -629,6 +593,9 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
     )
     return yemot_read(msg, "product_choice", max_digits=1, min_digits=1)
 
+# -------------------------------------------------------------------
+# 5. סיום קנייה והעברה דינמית לסליקת אשראי
+# -------------------------------------------------------------------
 def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Response:
     cart = session.get("cart", [])
     call_id = session.get("call_id")
@@ -638,11 +605,19 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
         background_tasks.add_task(log_general_event, call_id, phone, "סיום שיחה", "יצא ללא הזמנה")
         return yemot_msg("סל הקניות שלך ריק, תודה ולהתראות")
     
-    total_sum = sum(item["total"] for item in cart)
+    total_sum = int(sum(item["total"] for item in cart))
+    
+    # רישום ל-Google Sheets
     background_tasks.add_task(log_transaction_to_sheet, session)
-    background_tasks.add_task(log_general_event, call_id, phone, "הזמנה הושלמה", f"סה\"כ {total_sum} ש\"ח")
+    background_tasks.add_task(log_general_event, call_id, phone, "הזמנה הושלמה - מעבר לסליקה", f"סה\"כ {total_sum} ש\"ח")
     
     if call_id in SESSIONS:
         del SESSIONS[call_id]
         
-    return yemot_msg(f"הזמנתך נקלטה בהצלחה, סך הכל לתשלום: {int(total_sum)} שקלים, תודה רבה ולהתראות")
+    # בניית מחרוזת סליקת אשראי דינמית מול ימות המשיח
+    credit_card_str = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_REGISTER_NO},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY}"
+    msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
+    
+    # תגובה משורשרת: השמעת הודעה + העברה ישירה למודול אשראי
+    content = f"id_list_message=t-{msg}&{credit_card_str}"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
