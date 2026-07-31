@@ -8,7 +8,6 @@ from fastapi.responses import Response
 
 app = FastAPI(title="Yemot Sales IVR System")
 
-# קישור ה-Apps Script מתוך משתני הסביבה ב-Render
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
 CACHE = {
@@ -19,6 +18,22 @@ CACHE = {
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
+SYSTEM_PARAMS = {
+    "ApiCallId", "ApiPhone", "ApiDID", "ApiRealDID", 
+    "ApiExtension", "ApiTime", "ApiYFCallId", "ApiEnterID", "ApiEnterIDName"
+}
+
+def clean_tts(text: str) -> str:
+    """מנקה תווי הפרדה שעלולים לשבור את ה-Parser של ימות המשיח"""
+    if not text:
+        return ""
+    text = text.replace(".", " ") # נקודה מפצלת הודעות בימות
+    text = text.replace("-", " ") # מקף משמש למבנה הפקודה
+    text = text.replace('"', "")  # מחיקת מירכאות
+    text = text.replace("'", "")  # מחיקת גרשיים
+    text = text.replace("=", " ") # מחיקת שווה
+    return text.strip()
+
 def get_field(item: dict, *keys, default=""):
     """שליפת ערך מתוך מילון עם תמיכה בשמות עמודות בעברית ובאנגלית"""
     for k in keys:
@@ -27,7 +42,7 @@ def get_field(item: dict, *keys, default=""):
     return default
 
 def load_data_from_sheets():
-    """טעינת נתונים מ-Google Sheets לזיכרון השרת"""
+    """טעינת נתונים מ-Google Sheets"""
     if not APPS_SCRIPT_URL:
         print(" Error: APPS_SCRIPT_URL variable is missing!")
         return
@@ -36,7 +51,7 @@ def load_data_from_sheets():
         response = requests.get(APPS_SCRIPT_URL, timeout=10)
         data = response.json()
         
-        # 1. טעינת משתמשים
+        # 1. משתמשים
         users_dict = {}
         for u in data.get("users", []):
             is_active = str(get_field(u, "פעיל", "is_active", default="TRUE")).upper()
@@ -47,7 +62,7 @@ def load_data_from_sheets():
                 if phone: users_dict[phone] = u
         CACHE["users"] = users_dict
         
-        # 2. טעינת קטגוריות
+        # 2. קטגוריות
         cats = []
         for c in data.get("categories", []):
             cats.append({
@@ -57,7 +72,7 @@ def load_data_from_sheets():
             })
         CACHE["categories"] = cats
         
-        # 3. טעינת מוצרים
+        # 3. מוצרים
         prods = []
         for p in data.get("products", []):
             in_stock = str(get_field(p, "במלאי", "in_stock", default="TRUE")).upper()
@@ -110,7 +125,7 @@ def log_transaction_to_sheet(session_data: dict):
     try:
         user = session_data.get("user", {})
         cart = session_data.get("cart", [])
-        items_summary = "; ".join([f"{item['name']} (מק\"ט {item['sku']}) x {item['qty']} = {item['total']} ש\"ח" for item in cart])
+        items_summary = "; ".join([f"{item['name']} מקט {item['sku']} כמות {item['qty']} סך הכל {item['total']} שח" for item in cart])
         total_sum = sum(item['total'] for item in cart)
         
         first_name = get_field(user, "שם פרטי", "first_name")
@@ -132,28 +147,20 @@ def log_transaction_to_sheet(session_data: dict):
         print(f" Error logging transaction: {e}")
 
 def yemot_read(text: str, var_name: str, max_digits=10, min_digits=1, sec=7, sec_type="Number") -> Response:
-    """
-    פורמט read תקין ומדויק לפי מסמך API ימות המשיח:
-    1. var_name (שם הפרמטר)
-    2. no (אי שימוש בערך קודם)
-    3. max_digits (מקסימום ספרות)
-    4. min_digits (מינימום ספרות)
-    5. sec (זמן המתנה בשניות)
-    6. sec_type (סוג הנתון)
-    7. no (חסימת כוכבית)
-    8. no (חסימת אפס)
-    9. */ (החלפת סימנים)
-    """
-    content = f"read=t-{text}={var_name},no,{max_digits},{min_digits},{sec},{sec_type},no,no,*/"
+    clean_text = clean_tts(text)
+    content = f"read=t-{clean_text}={var_name},no,{max_digits},{min_digits},{sec},{sec_type},no,no,*/"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
-    content = f"id_list_message=t-{text}"
+    clean_text = clean_tts(text)
+    content = f"id_list_message=t-{clean_text}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-# נתיב השורש / המיועד לקריאות מול ימות המשיח
-@app.api_route("/", methods=["GET", "POST"])
+@app.api_route("/", methods=["GET", "POST", "HEAD"])
 async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
+    if request.method == "HEAD":
+        return Response(content="OK", media_type="text/plain")
+
     params = dict(request.query_params)
     if request.method == "POST":
         form_data = await request.form()
@@ -161,7 +168,13 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         
     call_id = params.get("ApiCallId") or params.get("phone") or "default_session"
     phone = params.get("ApiPhone", "").strip()
-    user_input = params.get("ApiRealAnswer", "").strip()
+    
+    # חילוץ קלט המשתמש מכל פרמטר שאינו פרמטר מערכת
+    user_input = ""
+    for k, v in params.items():
+        if k not in SYSTEM_PARAMS and v:
+            user_input = str(v).strip()
+            break
     
     if call_id not in SESSIONS:
         SESSIONS[call_id] = {
@@ -175,7 +188,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     step = session["step"]
     
     # ---------------------------------------------------------
-    # שלב 1: זיהוי מורשים (ת.ז או טלפון)
+    # שלב 1: זיהוי מורשים
     # ---------------------------------------------------------
     if step == "AUTH":
         if not user_input:
@@ -184,7 +197,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 session["step"] = "MAIN_MENU"
                 background_tasks.add_task(log_general_event, call_id, phone, "זיהוי אוטומטי", f"זוהה לפי טלפון {phone}")
                 return await show_categories(session)
-            return yemot_read("שלום. אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
+            return yemot_read("שלום, אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
         
         if user_input in CACHE["users"]:
             session["user"] = CACHE["users"][user_input]
@@ -194,7 +207,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         else:
             session["step"] = "NOT_AUTHORIZED_CHOICE"
             background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", f"הוקש {user_input} - לא במורשים")
-            return yemot_read("המערכת מזהה כי אינך רשום למערכת. להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
+            return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
 
     elif step == "NOT_AUTHORIZED_CHOICE":
         if user_input == "1":
@@ -202,9 +215,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
         elif user_input == "2":
             del SESSIONS[call_id]
-            return yemot_msg("הועברתם לרישום. אנא פנו לשירות הלקוחות. תודה ולהתראות")
+            return yemot_msg("הועברתם לרישום, אנא פנו לשירות הלקוחות, תודה ולהתראות")
         else:
-            return yemot_read("הקשה שגויה. להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
+            return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
 
     # ---------------------------------------------------------
     # שלב 2: תפריט קטגוריות
@@ -224,14 +237,14 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     session["selected_kashrut"] = None
                     return start_product_loop(session)
                 
-                k_text = f"בחרת בקטגוריית {selected_cat['category_name']}. "
+                k_text = f"בחרת בקטגוריית {selected_cat['category_name']}, "
                 for i, k in enumerate(kashruts, 1):
-                    k_text += f"לכשרות {k} הקישו {i}. "
+                    k_text += f"לכשרות {k} הקישו {i}, "
                 return yemot_read(k_text, "kashrut_choice", max_digits=1, min_digits=1)
             else:
-                return await show_categories(session, prefix="הקשה שגויה. ")
+                return await show_categories(session, prefix="הקשה שגויה, ")
         except ValueError:
-            return await show_categories(session, prefix="הקשה שגויה. ")
+            return await show_categories(session, prefix="הקשה שגויה, ")
 
     # ---------------------------------------------------------
     # שלב 3: תפריט כשרויות
@@ -244,9 +257,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 session["selected_kashrut"] = kashruts[choice_idx]
                 return start_product_loop(session)
             else:
-                return yemot_read("הקשה שגויה. אנא בחר כשרות מתוך הרשימה", "kashrut_choice", max_digits=1, min_digits=1)
+                return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", max_digits=1, min_digits=1)
         except ValueError:
-            return yemot_read("הקשה שגויה. אנא בחר כשרות מתוך הרשימה", "kashrut_choice", max_digits=1, min_digits=1)
+            return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", max_digits=1, min_digits=1)
 
     # ---------------------------------------------------------
     # שלב 4: דפדוף במוצרים
@@ -268,7 +281,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif user_input == "9":
             return finish_checkout(session, background_tasks)
         else:
-            return play_current_product(session, prefix="הקשה שגויה. ")
+            return play_current_product(session, prefix="הקשה שגויה, ")
 
     # ---------------------------------------------------------
     # שלב 5: הזנת כמות
@@ -277,37 +290,31 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         try:
             qty = int(user_input)
             if qty <= 0:
-                return yemot_read("כמות חייבת להיות גדולה מאפס. אנא הקש כמות תקינה", "qty_input", max_digits=3, min_digits=1)
+                return yemot_read("כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה", "qty_input", max_digits=3, min_digits=1)
             p = session["filtered_products"][session["product_index"]]
             total_price = qty * float(p["price"])
             session["pending_qty"] = qty
             session["pending_total"] = total_price
             session["step"] = "CONFIRM_ORDER"
-            msg = f"בחרת להזמין {qty} יחידות ממוצר {p['name']}. העלות הכוללת היא {int(total_price)} שקלים. לאישור הקישו 1, לביטול הקישו 2"
+            msg = f"בחרת להזמין {qty} יחידות ממוצר {p['name']}, העלות הכוללת היא {int(total_price)} שקלים, לאישור הקישו 1, לביטול הקישו 2"
             return yemot_read(msg, "confirm_choice", max_digits=1, min_digits=1)
         except ValueError:
-            return yemot_read("הקשה שגויה. אנא הקש כמות במספרים בלבד", "qty_input", max_digits=3, min_digits=1)
+            return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד", "qty_input", max_digits=3, min_digits=1)
 
-    # ---------------------------------------------------------
-    # שלב 6: אישור מוצר והוספה לסל
-    # ---------------------------------------------------------
     elif step == "CONFIRM_ORDER":
         if user_input == "1":
             p = session["filtered_products"][session["product_index"]]
             session["cart"].append({
                 "sku": p["sku"], "name": p["name"], "qty": session["pending_qty"], "total": session["pending_total"]
             })
-            background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"נוסף {p['name']} כמות: {session['pending_qty']}")
+            background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"נוסף {p['name']} כמות {session['pending_qty']}")
             session["step"] = "AFTER_ADD_MENU"
-            msg = "המוצר נוסף בהצלחה לסל הקניות שלך. למוצר הבא הקישו 1, למעבר לקטגוריה אחרת הקישו 2, לסיום ההזמנה הקישו 9"
+            msg = "המוצר נוסף בהצלחה לסל הקניות שלך, למוצר הבא הקישו 1, למעבר לקטגוריה אחרת הקישו 2, לסיום ההזמנה הקישו 9"
             return yemot_read(msg, "after_add_choice", max_digits=1, min_digits=1)
         else:
             session["step"] = "PRODUCT_LOOP"
-            return play_current_product(session, prefix="ההזמנה בוטלה. ")
+            return play_current_product(session, prefix="ההזמנה בוטלה, ")
 
-    # ---------------------------------------------------------
-    # שלב 7: תפריט לאחר הוספה לסל
-    # ---------------------------------------------------------
     elif step == "AFTER_ADD_MENU":
         if user_input == "1":
             session["product_index"] = (session["product_index"] + 1) % len(session["filtered_products"])
@@ -319,11 +326,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif user_input == "9":
             return finish_checkout(session, background_tasks)
         else:
-            return yemot_read("הקשה שגויה. למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקישו 9", "after_add_choice", max_digits=1, min_digits=1)
+            return yemot_read("הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקישו 9", "after_add_choice", max_digits=1, min_digits=1)
 
     return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
-
-# --- פונקציות עזר להרכבת הודעות ---
 
 async def show_categories(session: dict, prefix: str = "") -> Response:
     cats = CACHE["categories"]
@@ -331,7 +336,7 @@ async def show_categories(session: dict, prefix: str = "") -> Response:
         return yemot_msg("מצטערים, אין כרגע קטגוריות זמינות")
     text = prefix + "לתפריט ההזמנות: "
     for i, c in enumerate(cats, 1):
-        text += f"ל{c['category_name']} הקישו {i}. "
+        text += f"ל{c['category_name']} הקישו {i}, "
     session["step"] = "MAIN_MENU"
     return yemot_read(text, "cat_choice", max_digits=1, min_digits=1)
 
@@ -345,7 +350,7 @@ def start_product_loop(session: dict) -> Response:
     ]
     if not filtered:
         session["step"] = "MAIN_MENU"
-        return yemot_read("לא נמצאו מוצרים בקטגוריה זו. מעביר אותך חזרה לקטגוריות", "cat_choice", max_digits=1, min_digits=1)
+        return yemot_read("לא נמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", max_digits=1, min_digits=1)
     session["filtered_products"] = filtered
     session["product_index"] = 0
     session["step"] = "PRODUCT_LOOP"
@@ -354,10 +359,10 @@ def start_product_loop(session: dict) -> Response:
 def play_current_product(session: dict, prefix: str = "") -> Response:
     products = session["filtered_products"]
     p = products[session["product_index"]]
-    notes_str = f" הערה: {p['notes']}." if p.get('notes') else ""
-    display_price_str = f" המחיר המופיע על המוצר הוא {p['display_price']} שקלים." if p.get('display_price') else ""
+    notes_str = f" הערה: {p['notes']}," if p.get('notes') else ""
+    display_price_str = f" המחיר המופיע על המוצר הוא {p['display_price']} שקלים," if p.get('display_price') else ""
     msg = (
-        f"{prefix}מוצר: {p['name']}. מק\"ט {p['sku']}. מחיר ליחידה {p['price']} שקלים.{display_price_str}{notes_str} "
+        f"{prefix}מוצר: {p['name']}, מקט {p['sku']}, מחיר ליחידה {p['price']} שקלים,{display_price_str}{notes_str} "
         f"להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3"
     )
     return yemot_read(msg, "product_choice", max_digits=1, min_digits=1)
@@ -369,7 +374,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     
     if not cart:
         background_tasks.add_task(log_general_event, call_id, phone, "סיום שיחה", "יצא ללא הזמנה")
-        return yemot_msg("סל הקניות שלך ריק. תודה ולהתראות!")
+        return yemot_msg("סל הקניות שלך ריק, תודה ולהתראות")
     
     total_sum = sum(item["total"] for item in cart)
     background_tasks.add_task(log_transaction_to_sheet, session)
@@ -378,4 +383,4 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     if call_id in SESSIONS:
         del SESSIONS[call_id]
         
-    return yemot_msg(f"הזמנתך נקלטה בהצלחה! סך הכל לתשלום: {int(total_sum)} שקלים. תודה רבה ולהתראות!")
+    return yemot_msg(f"הזמנתך נקלטה בהצלחה, סך הכל לתשלום: {int(total_sum)} שקלים, תודה רבה ולהתראות")
