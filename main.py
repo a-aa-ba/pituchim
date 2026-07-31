@@ -89,7 +89,7 @@ def yemot_read(text: str, var_name: str, max_digits=10, min_digits=1, sec=7, sec
 def yemot_msg(text: str) -> str:
     return f"id_list_message=t-{text}"
 
-@app.all("/ivr", response_class=PlainTextResponse)
+@app.api_route("/ivr", methods=["GET", "POST"], response_class=PlainTextResponse)
 async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     params = dict(request.query_params)
     if request.method == "POST":
