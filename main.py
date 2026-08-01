@@ -17,10 +17,10 @@ app = FastAPI(title="Yemot Sales IVR System")
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
-# הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס)
-CREDIT_CARD_PROVIDER = os.environ.get("CREDIT_CARD_PROVIDER", "nedarim_plus")
-CREDIT_CARD_REGISTER_NO = os.environ.get("CREDIT_CARD_REGISTER_NO", "4001388") # רשום כאן את מספר המוסד מנדרים פלוס
-CREDIT_CARD_MAX_PAYMENTS = os.environ.get("CREDIT_CARD_MAX_PAYMENTS", "1")
+# הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס, תשלום 1 בלבד)
+CREDIT_CARD_PROVIDER = "nedarim_plus"
+CREDIT_CARD_REGISTER_NO = "4001388"
+CREDIT_CARD_MAX_PAYMENTS = "1" # תשלום אחד בלבד
 CREDIT_CARD_CURRENCY = os.environ.get("CREDIT_CARD_CURRENCY", "1")
 
 CACHE = {
@@ -41,11 +41,13 @@ STEP_PARAM_MAP = {
     "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
     "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
     "CONFIRM_REG_ADDRESS": ["confirm_reg_address", "ApiRealAnswer"],
+    "PERSONAL_AREA": ["personal_choice", "ApiRealAnswer"],
     "MAIN_MENU": ["cat_choice", "ApiRealAnswer"],
     "KASHRUT_MENU": ["kashrut_choice", "ApiRealAnswer"],
     "PRODUCT_LOOP": ["product_choice", "ApiRealAnswer"],
     "QTY_INPUT": ["qty_input", "ApiRealAnswer"],
-    "AFTER_ADD_MENU": ["after_add_choice", "ApiRealAnswer"]
+    "AFTER_ADD_MENU": ["after_add_choice", "ApiRealAnswer"],
+    "CONFIRM_CHECKOUT_FEE": ["checkout_confirm_choice", "ApiRealAnswer"]
 }
 
 # -------------------------------------------------------------------
@@ -236,7 +238,7 @@ def log_transaction_to_sheet(session_data: dict):
         user = session_data.get("user", {})
         cart = session_data.get("cart", [])
         items_summary = "; ".join([f"{item['name']} מקט {item['sku']} כמות {item['qty']} סך הכל {item['total']} שח" for item in cart])
-        total_sum = sum(item['total'] for item in cart)
+        total_sum = session_data.get("total_sum_with_fee", sum(item['total'] for item in cart) + 10)
         
         first_name = get_field(user, "שם פרטי", "first_name")
         last_name = get_field(user, "שם משפחה", "last_name")
@@ -314,25 +316,56 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     user_input = clean_input(raw_user_input)
     
     # ---------------------------------------------------------
-    # שלב פתיחה
+    # שלב פתיחה מורחב
     # ---------------------------------------------------------
     if step == "WELCOME":
         if not user_input:
+            msg = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5"
+            return yemot_read(msg, "welcome_choice", max_digits=1, min_digits=1)
+        
+        if user_input == "1":
+            return Response(content="id_list_message=t-מעביר להודעות ועדכונים&go_to_folder=/1", media_type="text/plain; charset=utf-8")
+        elif user_input == "2":
             if phone in CACHE["users"]:
                 session["user"] = CACHE["users"][phone]
                 session["step"] = "MAIN_MENU"
                 background_tasks.add_task(log_general_event, call_id, phone, "זיהוי אוטומטי", f"זוהה לפי טלפון {phone}")
-                return await show_categories(session, prefix="שלום ברוכים הבאים, ")
-            return yemot_read("שלום וברוכים הבאים למערכת ההזמנות, לכניסה למערכת הקישו 1, לרישום למערכת הקישו 2", "welcome_choice", max_digits=1, min_digits=1)
-        
-        if user_input == "1":
+                return await show_categories(session)
             session["step"] = "AUTH"
             return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
+        elif user_input == "3":
+            session["step"] = "REG_NAME"
+            return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
+        elif user_input == "4":
+            session["step"] = "PERSONAL_AREA"
+            user = session.get("user") or CACHE["users"].get(phone)
+            if user:
+                name = get_field(user, "שם פרטי", "first_name")
+                addr = get_field(user, "כתובת", "address")
+                msg = f"שלום {name}, הכתובת הרשומה במערכת היא {addr}, לתפריט ראשי הקישו 1"
+            else:
+                msg = "אינך מחובר למערכת, לכניסה הקישו 1, לרישום הקישו 2"
+            return yemot_read(msg, "personal_choice", max_digits=1, min_digits=1)
+        elif user_input == "5":
+            session["filtered_products"] = CACHE["products"]
+            session["product_index"] = 0
+            session["step"] = "PRODUCT_LOOP"
+            return play_current_product(session)
+        elif user_input == "7":
+            return Response(content="id_list_message=t-מעביר לשלוחה שבע&go_to_folder=/7", media_type="text/plain; charset=utf-8")
+        else:
+            return yemot_read("הקשה שגויה, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג הקישו 5", "welcome_choice", max_digits=1, min_digits=1)
+
+    elif step == "PERSONAL_AREA":
+        if user_input == "1":
+            session["step"] = "MAIN_MENU"
+            return await show_categories(session)
         elif user_input == "2":
             session["step"] = "REG_NAME"
             return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
         else:
-            return yemot_read("הקשה שגויה, לכניסה למערכת הקישו 1, לרישום למערכת הקישו 2", "welcome_choice", max_digits=1, min_digits=1)
+            session["step"] = "MAIN_MENU"
+            return await show_categories(session)
 
     # ---------------------------------------------------------
     # שלב 1: זיהוי מורשים
@@ -444,7 +477,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     elif step == "MAIN_MENU":
         cats = CACHE["categories"]
         if user_input == "9":
-            return finish_checkout(session, background_tasks)
+            return initiate_checkout(session)
             
         try:
             choice_idx = int(user_input) - 1
@@ -474,7 +507,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     elif step == "KASHRUT_MENU":
         kashruts = session.get("available_kashruts", [])
         if user_input == "9":
-            return finish_checkout(session, background_tasks)
+            return initiate_checkout(session)
             
         try:
             choice_idx = int(user_input) - 1
@@ -505,7 +538,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             session["step"] = "MAIN_MENU"
             return await show_categories(session)
         elif user_input == "9":
-            return finish_checkout(session, background_tasks)
+            return initiate_checkout(session)
         else:
             return play_current_product(session, prefix="הקשה שגויה, ")
 
@@ -541,9 +574,24 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             session["step"] = "MAIN_MENU"
             return await show_categories(session)
         elif user_input == "9":
-            return finish_checkout(session, background_tasks)
+            return initiate_checkout(session)
         else:
             return yemot_read("הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9", "after_add_choice", max_digits=1, min_digits=1)
+
+    # ---------------------------------------------------------
+    # שלב 6: אישור דמי החזקת תחנת חלוקה (10 ש"ח)
+    # ---------------------------------------------------------
+    elif step == "CONFIRM_CHECKOUT_FEE":
+        if user_input == "1":
+            return finish_checkout(session, background_tasks)
+        elif user_input == "2":
+            session["cart"] = []
+            session["step"] = "MAIN_MENU"
+            return await show_categories(session, prefix="ההזמנה בוטלה, מעביר אותך חזרה לתפריט, ")
+        else:
+            total_with_fee = session.get("total_sum_with_fee", 10)
+            msg = f"הקשה שגויה, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
+            return yemot_read(msg, "checkout_confirm_choice", max_digits=1, min_digits=1)
 
     return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
 
@@ -590,7 +638,23 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
     return yemot_read(msg, "product_choice", max_digits=1, min_digits=1)
 
 # -------------------------------------------------------------------
-# 5. סיום קנייה והעברה דינמית לסליקת אשראי
+# 5. תחילת יציאה לתשלום: הודעה על 10 ש"ח + אישור
+# -------------------------------------------------------------------
+def initiate_checkout(session: dict) -> Response:
+    cart = session.get("cart", [])
+    if not cart:
+        return yemot_msg("סל הקניות שלך ריק, תודה ולהתראות")
+    
+    cart_sum = int(sum(item["total"] for item in cart))
+    total_with_fee = cart_sum + 10
+    session["total_sum_with_fee"] = total_with_fee
+    session["step"] = "CONFIRM_CHECKOUT_FEE"
+    
+    msg = f"שימו לב, בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
+    return yemot_read(msg, "checkout_confirm_choice", max_digits=1, min_digits=1)
+
+# -------------------------------------------------------------------
+# 6. מעבר סופי לסליקת אשראי עם הסכום הכולל
 # -------------------------------------------------------------------
 def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Response:
     cart = session.get("cart", [])
@@ -601,19 +665,17 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
         background_tasks.add_task(log_general_event, call_id, phone, "סיום שיחה", "יצא ללא הזמנה")
         return yemot_msg("סל הקניות שלך ריק, תודה ולהתראות")
     
-    total_sum = int(sum(item["total"] for item in cart))
+    cart_sum = int(sum(item["total"] for item in cart))
+    total_sum = session.get("total_sum_with_fee") or (cart_sum + 10)
     
-    # רישום העסקה בגיליון Google Sheets
     background_tasks.add_task(log_transaction_to_sheet, session)
-    background_tasks.add_task(log_general_event, call_id, phone, "הזמנה הושלמה - מעבר לסליקה", f"סה\"כ {total_sum} ש\"ח")
+    background_tasks.add_task(log_general_event, call_id, phone, "הזמנה הושלמה - מעבר לסליקה", f"סה\"כ כולל דמי החזקה {total_sum} ש\"ח")
     
     if call_id in SESSIONS:
         del SESSIONS[call_id]
         
     msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
     
-    # פורמט מעבר לסליקה מדויק בנדרים פלוס לפי תיעוד ימות המשיח:
-    # credit_card=nedarim_plus,סכום,,,,,,מספר_מוסד
     credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},,,,,,{CREDIT_CARD_REGISTER_NO}"
     
     content = f"id_list_message=t-{msg}&{credit_card_cmd}"
