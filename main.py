@@ -13,14 +13,14 @@ import speech_recognition as sr
 
 app = FastAPI(title="Yemot Sales IVR System")
 
-# הגדרות סליקה וטוקן
+# הגדרות סליקה וטוקן ימות המשיח
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
-CREDIT_CARD_PROVIDER = "nedarim_plus"
-CREDIT_CARD_REGISTER_NO = "4001388"
-CREDIT_CARD_MAX_PAYMENTS = "1"
-CREDIT_CARD_CURRENCY = "1"
+CREDIT_CARD_PROVIDER = os.environ.get("CREDIT_CARD_PROVIDER", "pelecard")
+CREDIT_CARD_REGISTER_NO = os.environ.get("CREDIT_CARD_REGISTER_NO", "999")
+CREDIT_CARD_MAX_PAYMENTS = os.environ.get("CREDIT_CARD_MAX_PAYMENTS", "1")
+CREDIT_CARD_CURRENCY = os.environ.get("CREDIT_CARD_CURRENCY", "1")
 
 CACHE = {
     "users": {},
@@ -214,7 +214,11 @@ def log_general_event(call_id: str, phone: str, event_type: str, details: str):
     except Exception as e: pass
 
 def save_new_user_to_sheet(user_data: dict):
-    if not APPS_SCRIPT_URL: return
+    """שמירת משתמש חדש ב-Google Sheets עם לוג מפורט"""
+    if not APPS_SCRIPT_URL:
+        print(" LOG ERROR: APPS_SCRIPT_URL missing, cannot save user!", flush=True)
+        return
+        
     try:
         payload = {
             "type": "register_user",
@@ -224,8 +228,12 @@ def save_new_user_to_sheet(user_data: dict):
             "last_name": "",
             "address": str(user_data.get("address", ""))
         }
-        requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-    except Exception as e: pass
+        print(f" LOG: Sending register_user payload to Sheets: {payload}", flush=True)
+        
+        res = requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
+        print(f" LOG: Google Sheets register response [Status {res.status_code}]: {res.text}", flush=True)
+    except Exception as e:
+        print(f" LOG ERROR registering user to sheet: {e}", flush=True)
 
 def log_transaction_to_sheet(session_data: dict):
     if not APPS_SCRIPT_URL: return
@@ -389,7 +397,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", max_digits=9, min_digits=8)
             
         session["reg_data"]["id_number"] = user_input
-        # מעבר ישיר לטלפון ללא הקראת ת.ז מחדש
         session["step"] = "REG_PHONE"
         return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
 
@@ -397,7 +404,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not user_input:
             return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
         session["reg_data"]["phone"] = user_input
-        # מעבר ישיר לכתובת ללא הקראת טלפון מחדש
         session["step"] = "REG_ADDRESS"
         return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address")
 
@@ -458,7 +464,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     session["selected_kashrut"] = None
                     return start_product_loop(session)
                 
-                # ללא השמעת "בחרת בקטגוריית X"
                 k_text = ""
                 for i, k in enumerate(kashruts, 1):
                     k_text += f"לכשרות {k} הקישו {i}, "
@@ -521,7 +526,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             p = session["filtered_products"][session["product_index"]]
             total_price = qty * float(p["price"])
             
-            # הוספה מיידית לסל הקניות
             session["cart"].append({
                 "sku": p["sku"], "name": p["name"], "qty": qty, "total": total_price
             })
@@ -604,17 +608,14 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     
     total_sum = int(sum(item["total"] for item in cart))
     
-    # רישום ל-Google Sheets
     background_tasks.add_task(log_transaction_to_sheet, session)
     background_tasks.add_task(log_general_event, call_id, phone, "הזמנה הושלמה - מעבר לסליקה", f"סה\"כ {total_sum} ש\"ח")
     
     if call_id in SESSIONS:
         del SESSIONS[call_id]
         
-    # בניית מחרוזת סליקת אשראי דינמית מול ימות המשיח
     credit_card_str = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_REGISTER_NO},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY}"
     msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
     
-    # תגובה משורשרת: השמעת הודעה + העברה ישירה למודול אשראי
     content = f"id_list_message=t-{msg}&{credit_card_str}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
