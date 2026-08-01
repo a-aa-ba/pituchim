@@ -603,6 +603,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     
     total_sum = int(sum(item["total"] for item in cart))
     
+    # רישום העסקה בגיליון Google Sheets
     background_tasks.add_task(log_transaction_to_sheet, session)
     background_tasks.add_task(log_general_event, call_id, phone, "הזמנה הושלמה - מעבר לסליקה", f"סה\"כ {total_sum} ש\"ח")
     
@@ -611,13 +612,9 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
         
     msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
     
-    # תגובת סליקה מפורשת המונעת שגיאת 'אין מספר מסוף'
-    content = (
-        f"id_list_message=t-{msg}"
-        f"&credit_card_type={CREDIT_CARD_PROVIDER}"
-        f"&credit_card_terminal_number={CREDIT_CARD_REGISTER_NO}"
-        f"&billing_sum={total_sum}"
-        f"&credit_card_max_tashloumim={CREDIT_CARD_MAX_PAYMENTS}"
-        f"&credit_card_currency={CREDIT_CARD_CURRENCY}"
-    )
+    # פורמט מעבר לסליקה מדויק בנדרים פלוס לפי תיעוד ימות המשיח:
+    # credit_card=nedarim_plus,סכום,,,,,,מספר_מוסד
+    credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},,,,,,{CREDIT_CARD_REGISTER_NO}"
+    
+    content = f"id_list_message=t-{msg}&{credit_card_cmd}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
