@@ -17,8 +17,8 @@ app = FastAPI(title="Yemot Sales IVR System")
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
-CREDIT_CARD_PROVIDER = os.environ.get("CREDIT_CARD_PROVIDER", "pelecard")
-CREDIT_CARD_REGISTER_NO = os.environ.get("CREDIT_CARD_REGISTER_NO", "999")
+CREDIT_CARD_PROVIDER = os.environ.get("CREDIT_CARD_PROVIDER", "nedarim_plus")
+CREDIT_CARD_REGISTER_NO = os.environ.get("CREDIT_CARD_REGISTER_NO", "4001388")
 CREDIT_CARD_MAX_PAYMENTS = os.environ.get("CREDIT_CARD_MAX_PAYMENTS", "1")
 CREDIT_CARD_CURRENCY = os.environ.get("CREDIT_CARD_CURRENCY", "1")
 
