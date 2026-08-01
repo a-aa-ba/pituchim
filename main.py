@@ -17,8 +17,9 @@ app = FastAPI(title="Yemot Sales IVR System")
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
+# הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס)
 CREDIT_CARD_PROVIDER = os.environ.get("CREDIT_CARD_PROVIDER", "nedarim_plus")
-CREDIT_CARD_REGISTER_NO = os.environ.get("CREDIT_CARD_REGISTER_NO", "4001388")
+CREDIT_CARD_REGISTER_NO = os.environ.get("CREDIT_CARD_REGISTER_NO", "4001388") # רשום כאן את מספר המוסד מנדרים פלוס
 CREDIT_CARD_MAX_PAYMENTS = os.environ.get("CREDIT_CARD_MAX_PAYMENTS", "1")
 CREDIT_CARD_CURRENCY = os.environ.get("CREDIT_CARD_CURRENCY", "1")
 
@@ -214,11 +215,7 @@ def log_general_event(call_id: str, phone: str, event_type: str, details: str):
     except Exception as e: pass
 
 def save_new_user_to_sheet(user_data: dict):
-    """שמירת משתמש חדש ב-Google Sheets עם לוג מפורט"""
-    if not APPS_SCRIPT_URL:
-        print(" LOG ERROR: APPS_SCRIPT_URL missing, cannot save user!", flush=True)
-        return
-        
+    if not APPS_SCRIPT_URL: return
     try:
         payload = {
             "type": "register_user",
@@ -228,12 +225,10 @@ def save_new_user_to_sheet(user_data: dict):
             "last_name": "",
             "address": str(user_data.get("address", ""))
         }
-        print(f" LOG: Sending register_user payload to Sheets: {payload}", flush=True)
-        
         res = requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-        print(f" LOG: Google Sheets register response [Status {res.status_code}]: {res.text}", flush=True)
+        print(f" LOG: User register sheet response [Code {res.status_code}]: {res.text}", flush=True)
     except Exception as e:
-        print(f" LOG ERROR registering user to sheet: {e}", flush=True)
+        print(f" LOG ERROR registering user: {e}", flush=True)
 
 def log_transaction_to_sheet(session_data: dict):
     if not APPS_SCRIPT_URL: return
@@ -367,7 +362,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
 
     # ---------------------------------------------------------
-    # תהליך הרשמה (ללא חזרות מיותרות)
+    # תהליך הרשמה
     # ---------------------------------------------------------
     elif step == "REG_NAME":
         if not raw_user_input:
@@ -515,7 +510,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return play_current_product(session, prefix="הקשה שגויה, ")
 
     # ---------------------------------------------------------
-    # שלב 5: הזנת כמות (הוספה מידית לסל ללא אישור כפול)
+    # שלב 5: הזנת כמות
     # ---------------------------------------------------------
     elif step == "QTY_INPUT":
         try:
@@ -614,8 +609,12 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     if call_id in SESSIONS:
         del SESSIONS[call_id]
         
-    credit_card_str = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_REGISTER_NO},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY}"
     msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
     
-    content = f"id_list_message=t-{msg}&{credit_card_str}"
-    return Response(content=content, media_type="text/plain; charset=utf-8")
+    # תגובת סליקה מפורשת המונעת שגיאת 'אין מספר מסוף'
+    content = (
+        f"id_list_message=t-{msg}"
+        f"&credit_card_type={CREDIT_CARD_PROVIDER}"
+        f"&credit_card_terminal_number={CREDIT_CARD_REGISTER_NO}"
+        f"&billing_sum={total_sum}"
+        f"&credit_card_max_tashloumim={
