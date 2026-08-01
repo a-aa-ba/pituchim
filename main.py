@@ -617,4 +617,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
         f"&credit_card_type={CREDIT_CARD_PROVIDER}"
         f"&credit_card_terminal_number={CREDIT_CARD_REGISTER_NO}"
         f"&billing_sum={total_sum}"
-        f"&credit_card_max_tashloumim={
+        f"&credit_card_max_tashloumim={CREDIT_CARD_MAX_PAYMENTS}"
+        f"&credit_card_currency={CREDIT_CARD_CURRENCY}"
+    )
+    return Response(content=content, media_type="text/plain; charset=utf-8")
