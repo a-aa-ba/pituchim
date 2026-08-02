@@ -264,10 +264,10 @@ def log_transaction_to_sheet(session_data: dict):
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
     except Exception as e: pass
 
-# פונקציית הקראה עם play_ok=no ו-confirm=no קשיחים למניעת אישורים אוטומטיים בימות המשיח
+# פונקציית הקראה עם פורמט קשיח למניעת אישורים והשמעות אוטומטיות
 def yemot_read(text: str, var_name: str, max_digits=10, min_digits=1, sec=7, sec_type="Digits") -> Response:
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},no,{max_digits},{min_digits},{sec},{sec_type},no,no,*/"
+    content = f"read=t-{clean_text}={var_name},no,{max_digits},{min_digits},{sec},{sec_type},no,no,*/,,,,,no"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_read_record(text: str, var_name: str) -> Response:
@@ -336,7 +336,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
             clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
             clean_welcome = clean_tts(welcome_text)
-            content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
+            content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/,,,,,no"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
         if user_input == "1":
