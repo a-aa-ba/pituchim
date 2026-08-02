@@ -264,15 +264,26 @@ def log_transaction_to_sheet(session_data: dict):
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
     except Exception as e: pass
 
-# פונקציית הקראה עם פורמט קשיח למניעת אישורים והשמעות אוטומטיות
-def yemot_read(text: str, var_name: str, max_digits=10, min_digits=1, sec=7, sec_type="Digits") -> Response:
+# פונקציית העזר הראשית להקראה והקשה - כוללת את כל הגדרות ימות המשיח
+def yemot_read(
+    text: str,
+    var_name: str,
+    max_digits: int = 10,
+    min_digits: int = 1,
+    sec: int = 7,
+    sec_type: str = "Digits",
+    play_ok: str = "no",
+    confirm: str = "no",
+    re_read: str = "no",
+    block_asterisk: str = "*/"
+) -> Response:
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},no,{max_digits},{min_digits},{sec},{sec_type},no,no,*/,,,,,no"
+    content = f"read=t-{clean_text}={var_name},{re_read},{max_digits},{min_digits},{sec},{sec_type},{play_ok},{confirm},{block_asterisk},,,,,no"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-def yemot_read_record(text: str, var_name: str) -> Response:
+def yemot_read_record(text: str, var_name: str, re_read: str = "no") -> Response:
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},no,record"
+    content = f"read=t-{clean_text}={var_name},{re_read},record"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
@@ -326,11 +337,20 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     welcome_text = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5, לרישום לקבלת צינתוק כשעולה הודעה חדשה הקישו 6"
     
     # ---------------------------------------------------------
-    # שלב פתיחה
+    # שלב פתיחה (תפריט ראשי)
     # ---------------------------------------------------------
     if step == "WELCOME":
         if not user_input:
-            return yemot_read(welcome_text, "welcome_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text=welcome_text,
+                var_name="welcome_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         
         # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5
         if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
@@ -352,11 +372,23 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             else:
                 session["auth_target"] = "MAIN_MENU"
                 session["step"] = "AUTH"
-                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=9)
+                return yemot_read(
+                    text="אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+                    var_name="auth_id",
+                    max_digits=10,
+                    min_digits=9,
+                    sec=7,
+                    sec_type="Digits",
+                    play_ok="no",
+                    confirm="no"
+                )
                 
         elif user_input == "3":
             session["step"] = "REG_NAME"
-            return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
+            return yemot_read_record(
+                text="אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית",
+                var_name="reg_name"
+            )
             
         elif user_input == "4":
             user = session.get("user") or CACHE["users"].get(phone)
@@ -366,7 +398,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             else:
                 session["auth_target"] = "PERSONAL_AREA"
                 session["step"] = "AUTH"
-                return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=9)
+                return yemot_read(
+                    text="לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+                    var_name="auth_id",
+                    max_digits=10,
+                    min_digits=9,
+                    sec=7,
+                    sec_type="Digits",
+                    play_ok="no",
+                    confirm="no"
+                )
                 
         elif user_input == "5":
             session["filtered_products"] = CACHE["products"]
@@ -381,7 +422,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return Response(content="id_list_message=go_to_folder=/7", media_type="text/plain; charset=utf-8")
             
         else:
-            return yemot_read(f"הקשה שגויה, {welcome_text}", "welcome_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text=f"הקשה שגויה, {welcome_text}",
+                var_name="welcome_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
 
     elif step == "PERSONAL_AREA":
         if user_input == "1":
@@ -394,7 +444,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     # ---------------------------------------------------------
     elif step == "AUTH":
         if not user_input:
-            return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=9)
+            return yemot_read(
+                text="אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+                var_name="auth_id",
+                max_digits=10,
+                min_digits=9,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         
         if user_input in CACHE["users"]:
             session["user"] = CACHE["users"][user_input]
@@ -409,62 +468,161 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         else:
             session["step"] = "NOT_AUTHORIZED_CHOICE"
             background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", f"הוקש {user_input} - לא במורשים")
-            return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text="המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2",
+                var_name="unauth_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
 
     elif step == "NOT_AUTHORIZED_CHOICE":
         if user_input == "1":
             session["step"] = "AUTH"
-            return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
+            return yemot_read(
+                text="אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+                var_name="auth_id",
+                max_digits=10,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         elif user_input == "2":
             session["step"] = "REG_NAME"
-            return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
+            return yemot_read_record(
+                text="אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית",
+                var_name="reg_name"
+            )
         else:
-            return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text="הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2",
+                var_name="unauth_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
 
     # ---------------------------------------------------------
     # תהליך הרשמה (שם -> ת.ז -> טלפון -> כתובת -> קוד קהילה)
     # ---------------------------------------------------------
     elif step == "REG_NAME":
         if not raw_user_input:
-            return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
+            return yemot_read_record(
+                text="אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית",
+                var_name="reg_name"
+            )
         
         transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
         if not transcribed_text:
-            return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
+            return yemot_read_record(
+                text="לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית",
+                var_name="reg_name"
+            )
             
         session["reg_data"]["first_name"] = transcribed_text
         session["step"] = "REG_ID"
-        return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", max_digits=9, min_digits=8)
+        return yemot_read(
+            text="אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית",
+            var_name="reg_id",
+            max_digits=9,
+            min_digits=8,
+            sec=7,
+            sec_type="Digits",
+            play_ok="no",
+            confirm="no"
+        )
 
     elif step == "REG_ID":
         if not user_input:
-            return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", max_digits=9, min_digits=8)
+            return yemot_read(
+                text="אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית",
+                var_name="reg_id",
+                max_digits=9,
+                min_digits=8,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         
         if user_input in CACHE["users"]:
-            return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", max_digits=9, min_digits=8)
+            return yemot_read(
+                text="מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר",
+                var_name="reg_id",
+                max_digits=9,
+                min_digits=8,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
             
         session["reg_data"]["id_number"] = user_input
         session["step"] = "REG_PHONE"
-        return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
+        return yemot_read(
+            text="אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+            var_name="reg_phone",
+            max_digits=10,
+            min_digits=9,
+            sec=7,
+            sec_type="Digits",
+            play_ok="no",
+            confirm="no"
+        )
 
     elif step == "REG_PHONE":
         if not user_input:
-            return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", max_digits=10, min_digits=9)
+            return yemot_read(
+                text="אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+                var_name="reg_phone",
+                max_digits=10,
+                min_digits=9,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         session["reg_data"]["phone"] = user_input
         session["step"] = "REG_ADDRESS"
-        return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address")
+        return yemot_read_record(
+            text="אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית",
+            var_name="reg_address"
+        )
 
     elif step == "REG_ADDRESS":
         if not raw_user_input:
-            return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address")
+            return yemot_read_record(
+                text="אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית",
+                var_name="reg_address"
+            )
             
         transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
         if not transcribed_text:
-            return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address")
+            return yemot_read_record(
+                text="לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית",
+                var_name="reg_address"
+            )
 
         session["reg_data"]["address"] = transcribed_text
         session["step"] = "REG_COMMUNITY_CODE"
-        return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", max_digits=6, min_digits=6)
+        return yemot_read(
+            text="אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית",
+            var_name="reg_community_code",
+            max_digits=6,
+            min_digits=0,
+            sec=7,
+            sec_type="Digits",
+            play_ok="no",
+            confirm="no"
+        )
 
     elif step == "REG_COMMUNITY_CODE":
         community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
@@ -513,7 +671,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 k_text = ""
                 for i, k in enumerate(kashruts, 1):
                     k_text += f"לכשרות {k} הקישו {i}, "
-                return yemot_read(k_text, "kashrut_choice", max_digits=1, min_digits=1)
+                return yemot_read(
+                    text=k_text,
+                    var_name="kashrut_choice",
+                    max_digits=1,
+                    min_digits=1,
+                    sec=7,
+                    sec_type="Digits",
+                    play_ok="no",
+                    confirm="no"
+                )
             else:
                 return await show_categories(session, prefix="הקשה שגויה, ")
         except ValueError:
@@ -533,9 +700,27 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 session["selected_kashrut"] = kashruts[choice_idx]
                 return start_product_loop(session)
             else:
-                return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", max_digits=1, min_digits=1)
+                return yemot_read(
+                    text="הקשה שגויה, אנא בחר כשרות מתוך הרשימה",
+                    var_name="kashrut_choice",
+                    max_digits=1,
+                    min_digits=1,
+                    sec=7,
+                    sec_type="Digits",
+                    play_ok="no",
+                    confirm="no"
+                )
         except ValueError:
-            return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text="הקשה שגויה, אנא בחר כשרות מתוך הרשימה",
+                var_name="kashrut_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
 
     # ---------------------------------------------------------
     # שלב 4: דפדוף במוצרים במכירות
@@ -547,7 +732,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if user_input == "1":
             session["step"] = "QTY_INPUT"
             p = products[idx]
-            return yemot_read(f"הקש את מספר הפריטים שברצונך להזמין ממוצר {p['name']}", "qty_input", max_digits=3, min_digits=1)
+            return yemot_read(
+                text=f"הקש את מספר הפריטים שברצונך להזמין ממוצר {p['name']}",
+                var_name="qty_input",
+                max_digits=3,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         elif user_input == "2":
             next_idx = (idx + 1) % len(products)
             session["product_index"] = next_idx
@@ -573,7 +767,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return play_catalog_product(session)
         elif user_input == "2":
             session["step"] = "WELCOME"
-            return yemot_read(welcome_text, "welcome_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text=welcome_text,
+                var_name="welcome_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         else:
             return play_catalog_product(session, prefix="הקשה שגויה, ")
 
@@ -584,7 +787,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         try:
             qty = int(user_input)
             if qty <= 0:
-                return yemot_read("כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה", "qty_input", max_digits=3, min_digits=1)
+                return yemot_read(
+                    text="כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה",
+                    var_name="qty_input",
+                    max_digits=3,
+                    min_digits=1,
+                    sec=7,
+                    sec_type="Digits",
+                    play_ok="no",
+                    confirm="no"
+                )
             
             p = session["filtered_products"][session["product_index"]]
             total_price = qty * float(p["price"])
@@ -596,9 +808,27 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             
             session["step"] = "AFTER_ADD_MENU"
             msg = "המוצר נוסף בהצלחה לסל הקניות שלך, למוצר הבא הקישו 1, למעבר לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9"
-            return yemot_read(msg, "after_add_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text=msg,
+                var_name="after_add_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
         except ValueError:
-            return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד", "qty_input", max_digits=3, min_digits=1)
+            return yemot_read(
+                text="הקשה שגויה, אנא הקש כמות במספרים בלבד",
+                var_name="qty_input",
+                max_digits=3,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
 
     elif step == "AFTER_ADD_MENU":
         if user_input == "1":
@@ -611,7 +841,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif user_input == "9":
             return initiate_checkout(session)
         else:
-            return yemot_read("הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9", "after_add_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text="הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9",
+                var_name="after_add_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
 
     # ---------------------------------------------------------
     # שלב 6: אישור דמי החזקת תחנת חלוקה (10 ש"ח)
@@ -626,7 +865,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         else:
             total_with_fee = session.get("total_sum_with_fee", 10)
             msg = f"הקשה שגויה, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
-            return yemot_read(msg, "checkout_confirm_choice", max_digits=1, min_digits=1)
+            return yemot_read(
+                text=msg,
+                var_name="checkout_confirm_choice",
+                max_digits=1,
+                min_digits=1,
+                sec=7,
+                sec_type="Digits",
+                play_ok="no",
+                confirm="no"
+            )
 
     return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
 
@@ -635,19 +883,46 @@ def show_personal_area(session: dict) -> Response:
     if not user:
         session["auth_target"] = "PERSONAL_AREA"
         session["step"] = "AUTH"
-        return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
+        return yemot_read(
+            text="לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+            var_name="auth_id",
+            max_digits=10,
+            min_digits=1,
+            sec=7,
+            sec_type="Digits",
+            play_ok="no",
+            confirm="no"
+        )
         
     session["step"] = "PERSONAL_AREA"
     name = get_field(user, "שם פרטי ומשפחה", "שם פרטי", "first_name")
     addr = get_field(user, "כתובת", "address")
     msg = f"שלום {name}, הכתובת הרשומה במערכת היא {addr}, לתפריט ראשי הקישו 1"
-    return yemot_read(msg, "personal_choice", max_digits=1, min_digits=1)
+    return yemot_read(
+        text=msg,
+        var_name="personal_choice",
+        max_digits=1,
+        min_digits=1,
+        sec=7,
+        sec_type="Digits",
+        play_ok="no",
+        confirm="no"
+    )
 
 async def show_categories(session: dict, prefix: str = "") -> Response:
     if not session.get("user"):
         session["auth_target"] = "MAIN_MENU"
         session["step"] = "AUTH"
-        return yemot_read("לכניסה למערכת ההזמנות אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
+        return yemot_read(
+            text="לכניסה למערכת ההזמנות אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית",
+            var_name="auth_id",
+            max_digits=10,
+            min_digits=1,
+            sec=7,
+            sec_type="Digits",
+            play_ok="no",
+            confirm="no"
+        )
 
     cats = CACHE["categories"]
     if not cats:
@@ -657,7 +932,16 @@ async def show_categories(session: dict, prefix: str = "") -> Response:
         text += f"ל{c['category_name']} הקישו {i}, "
     text += "לסיום הקנייה ומעבר לתשלום הקישו 9"
     session["step"] = "MAIN_MENU"
-    return yemot_read(text, "cat_choice", max_digits=1, min_digits=1)
+    return yemot_read(
+        text=text,
+        var_name="cat_choice",
+        max_digits=1,
+        min_digits=1,
+        sec=7,
+        sec_type="Digits",
+        play_ok="no",
+        confirm="no"
+    )
 
 def start_product_loop(session: dict) -> Response:
     cat = str(session.get("selected_cat", "")).strip()
@@ -672,7 +956,16 @@ def start_product_loop(session: dict) -> Response:
     ]
     if not filtered:
         session["step"] = "MAIN_MENU"
-        return yemot_read("לא נמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", max_digits=1, min_digits=1)
+        return yemot_read(
+            text="לא נמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות",
+            var_name="cat_choice",
+            max_digits=1,
+            min_digits=1,
+            sec=7,
+            sec_type="Digits",
+            play_ok="no",
+            confirm="no"
+        )
     session["filtered_products"] = filtered
     session["product_index"] = 0
     session["step"] = "PRODUCT_LOOP"
@@ -688,7 +981,16 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
         f"{prefix}מוצר: {p['name']}, מקט {p['sku']}, מחיר ליחידה {p['price']} שקלים,{notes_str} "
         f"להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9"
     )
-    return yemot_read(msg, "product_choice", max_digits=1, min_digits=1)
+    return yemot_read(
+        text=msg,
+        var_name="product_choice",
+        max_digits=1,
+        min_digits=1,
+        sec=7,
+        sec_type="Digits",
+        play_ok="no",
+        confirm="no"
+    )
 
 def play_catalog_product(session: dict, prefix: str = "") -> Response:
     products = session.get("filtered_products", [])
@@ -702,7 +1004,16 @@ def play_catalog_product(session: dict, prefix: str = "") -> Response:
         f"{prefix}מוצר: {p['name']}, מקט {p['sku']}, מחיר ליחידה {p['price']} שקלים.{notes_str} "
         f"למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2"
     )
-    return yemot_read(msg, "catalog_choice", max_digits=1, min_digits=1)
+    return yemot_read(
+        text=msg,
+        var_name="catalog_choice",
+        max_digits=1,
+        min_digits=1,
+        sec=7,
+        sec_type="Digits",
+        play_ok="no",
+        confirm="no"
+    )
 
 # -------------------------------------------------------------------
 # 5. תחילת יציאה לתשלום: הודעה על 10 ש"ח + אישור (1 לאישור, 2 לביטול)
@@ -718,7 +1029,16 @@ def initiate_checkout(session: dict) -> Response:
     session["step"] = "CONFIRM_CHECKOUT_FEE"
     
     msg = f"שימו לב, בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
-    return yemot_read(msg, "checkout_confirm_choice", max_digits=1, min_digits=1)
+    return yemot_read(
+        text=msg,
+        var_name="checkout_confirm_choice",
+        max_digits=1,
+        min_digits=1,
+        sec=7,
+        sec_type="Digits",
+        play_ok="no",
+        confirm="no"
+    )
 
 # -------------------------------------------------------------------
 # 6. מעבר סופי לסליקת אשראי
