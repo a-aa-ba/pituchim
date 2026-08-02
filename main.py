@@ -808,7 +808,8 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
         
     msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
     
-    credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},,,,,,{CREDIT_CARD_REGISTER_NO}"
+     # הוספת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY בצורה מפורשת לשורה:
+    credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY},,,,{CREDIT_CARD_REGISTER_NO}"
     
     content = f"id_list_message=t-{msg}&{credit_card_cmd}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
