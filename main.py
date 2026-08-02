@@ -58,6 +58,27 @@ STEP_PARAM_MAP = {
     "CONFIRM_CHECKOUT_FEE": ["checkout_confirm_choice", "ApiRealAnswer"]
 }
 
+PROMPT_FILE_MAP = {
+    "welcome_choice": "001",
+    "auth_id": "003",
+    "unauth_choice": "004",
+    "reg_name": "005",
+    "reg_id": "007",
+    "reg_phone": "009",
+    "reg_address": "010",
+    "reg_community_code": "012",
+    "personal_choice": "014",
+    "new_community_code": "015",
+    "cat_choice": "017",
+    "kashrut_choice": "017",
+    "catalog_choice": "018",
+    "qty_input": "020",
+    "product_choice": "022",
+    "after_add_choice": "022",
+    "checkout_confirm_choice": "023",
+    "restore_cart_choice": "026"
+}
+
 # -------------------------------------------------------------------
 # 1. המרת שמע + פילטרים לניקוי רעשים ואיזון עוצמה (FFmpeg)
 # -------------------------------------------------------------------
@@ -279,22 +300,56 @@ def log_transaction_to_sheet(session_data: dict):
     except Exception as e:
         pass
 
+# זיהוי מספר הקובץ לפי הטקסט או המשתנה
+def get_prompt_file_num(text: str, var_name: str) -> str:
+    if "סגורה כעת" in text:
+        return "002"
+    if "לא הצלחנו לפענח" in text and "שמכם" in text:
+        return "006"
+    if "כבר רשום" in text:
+        return "008"
+    if "לא הצלחנו לפענח" in text and "כתובת" in text:
+        return "011"
+    if "הרשמתכם הושלמה" in text:
+        return "013"
+    if "קוד הקהילה עודכן" in text:
+        return "016"
+    if "אין כרגע מוצרים בקטלוג" in text:
+        return "018"
+    if "סל הקניות שלך ריק" in text:
+        return "019"
+    if "כמות חייבת להיות גדולה מאפס" in text:
+        return "020"
+    if "מספרים בלבד" in text:
+        return "021"
+    if "ההזמנה בוטלה" in text:
+        return "024"
+    if "סך הכל לתשלום" in text and "מועברים" in text:
+        return "025"
+    if "יש לך הזמנה פתוחה" in text:
+        return "026"
+    return PROMPT_FILE_MAP.get(var_name, "001")
+
 # -------------------------------------------------------------------
-# פונקציות מענה לימות המשיח
+# פונקציות מענה לימות המשיח - בדיקה אוטומטית: קובץ קודם, ואם אין - TTS
 # -------------------------------------------------------------------
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},{options}"
+    file_num = get_prompt_file_num(clean_text, var_name)
+    # ימות המשיח בודקת האם הקובץ 001.wav קיים בתיקייה "הודעות מערכת". אם לא - מקריאה את ה-TTS
+    content = f"read=f-הודעות מערכת/{file_num}:t-{clean_text}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},{options}&record_folder={record_folder}"
+    file_num = get_prompt_file_num(clean_text, var_name)
+    content = f"read=f-הודעות מערכת/{file_num}:t-{clean_text}={var_name},{options}&record_folder={record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
     clean_text = clean_tts(text)
-    content = f"id_list_message=t-{clean_text}"
+    file_num = get_prompt_file_num(clean_text, "")
+    content = f"id_list_message=f-הודעות מערכת/{file_num}:t-{clean_text}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 # בדיקה האם קיימת ללקוח הזמנה פתוחה שלא שולמה
@@ -374,7 +429,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
             clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
             clean_welcome = clean_tts(welcome_text)
-            content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
+            content = f"id_list_message=f-הודעות מערכת/002:t-{clean_closed}&read=f-הודעות מערכת/001:t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
         # מעבר מידי לשלוחה 1 ללא הודעה מקדימה
@@ -404,7 +459,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             else:
                 session["auth_target"] = "PERSONAL_AREA"
                 session["step"] = "AUTH"
-                return yemot_read("לכניסה לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
+                return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
                 
         elif user_input == "5":
             session["filtered_products"] = CACHE["products"]
@@ -866,5 +921,5 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     # שליחת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY מפורשות לסליקת תשלום אחד בלבד
     credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY},,,,{CREDIT_CARD_REGISTER_NO}"
     
-    content = f"id_list_message=t-{msg}&{credit_card_cmd}"
+    content = f"id_list_message=f-הודעות מערכת/025:t-{msg}&{credit_card_cmd}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
