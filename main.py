@@ -46,6 +46,7 @@ STEP_PARAM_MAP = {
     "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
     "REG_COMMUNITY_CODE": ["reg_community_code", "ApiRealAnswer"],
     "PERSONAL_AREA": ["personal_choice", "ApiRealAnswer"],
+    "UPDATE_COMMUNITY_CODE": ["new_community_code", "ApiRealAnswer"],
     "MAIN_MENU": ["cat_choice", "ApiRealAnswer"],
     "KASHRUT_MENU": ["kashrut_choice", "ApiRealAnswer"],
     "PRODUCT_LOOP": ["product_choice", "ApiRealAnswer"],
@@ -282,9 +283,10 @@ def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*
     content = f"read=t-{clean_text}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-def yemot_read_record(text: str, var_name: str, options: str = "no,record") -> Response:
+# הקלטות התמלול נשמרות בתיקיית "הקלטות" בשלוחה הראשית
+def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},{options}"
+    content = f"read=t-{clean_text}={var_name},{options}&record_folder={record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
@@ -359,8 +361,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
+        # מעבר מידי לשלוחה 1 ללא הודעה מקדימה
         if user_input == "1":
-            return Response(content="id_list_message=go_to_folder=/1", media_type="text/plain; charset=utf-8")
+            return Response(content="go_to_folder=/1", media_type="text/plain; charset=utf-8")
             
         elif user_input == "2":
             user = session.get("user") or CACHE["users"].get(phone)
@@ -394,20 +397,57 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             session["step"] = "CATALOG_LOOP"
             return play_catalog_product(session)
             
+        # מעבר מידי לשלוחה 6 ללא הודעה מקדימה
         elif user_input == "6":
-            return Response(content="id_list_message=&go_to_folder=/6", media_type="text/plain; charset=utf-8")
+            return Response(content="go_to_folder=/6", media_type="text/plain; charset=utf-8")
 
+        # מעבר מידי לשלוחה 7 ללא הודעה מקדימה
         elif user_input == "7":
-            return Response(content="id_list_message=go_to_folder=/7", media_type="text/plain; charset=utf-8")
+            return Response(content="go_to_folder=/7", media_type="text/plain; charset=utf-8")
             
         else:
             return yemot_read(f"הקשה שגויה, {welcome_text}", "welcome_choice", "no,1,1,7,Digits,no,no,*/")
 
+    # ---------------------------------------------------------
+    # שלב אזור אישי
+    # ---------------------------------------------------------
     elif step == "PERSONAL_AREA":
         if user_input == "1":
-            return await show_categories(session)
+            session["step"] = "WELCOME"
+            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+        elif user_input == "2":
+            session["step"] = "UPDATE_COMMUNITY_CODE"
+            return yemot_read("אנא הקישו את קוד הקהילה החדש שלכם ולאחר מכן הקישו סולמית", "new_community_code", "no,6,1,7,Digits,no,no,*/")
         else:
             return show_personal_area(session)
+
+    elif step == "UPDATE_COMMUNITY_CODE":
+        if not user_input:
+            return yemot_read("אנא הקישו את קוד הקהילה החדש שלכם ולאחר מכן הקישו סולמית", "new_community_code", "no,6,1,7,Digits,no,no,*/")
+            
+        new_code = user_input
+        user = session.get("user") or {}
+        user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or session.get("phone")
+        
+        if APPS_SCRIPT_URL:
+            try:
+                payload = {
+                    "type": "update_community_code",
+                    "id_number": str(user_id),
+                    "phone": str(session.get("phone", "")),
+                    "community_code": str(new_code)
+                }
+                background_tasks.add_task(requests.post, APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
+            except Exception:
+                pass
+
+        user["community_code"] = new_code
+        if user_id in CACHE["users"]:
+            CACHE["users"][user_id]["community_code"] = new_code
+        if session.get("phone") in CACHE["users"]:
+            CACHE["users"][session["phone"]]["community_code"] = new_code
+            
+        return show_personal_area(session, prefix="קוד הקהילה עודכן בהצלחה, ")
 
     # ---------------------------------------------------------
     # שלב 1: זיהוי מורשים
@@ -653,7 +693,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
 
     return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
 
-def show_personal_area(session: dict) -> Response:
+def show_personal_area(session: dict, prefix: str = "") -> Response:
     user = session.get("user")
     if not user:
         session["auth_target"] = "PERSONAL_AREA"
@@ -663,7 +703,9 @@ def show_personal_area(session: dict) -> Response:
     session["step"] = "PERSONAL_AREA"
     name = get_field(user, "שם פרטי ומשפחה", "שם פרטי", "first_name")
     addr = get_field(user, "כתובת", "address")
-    msg = f"שלום {name}, הכתובת הרשומה במערכת היא {addr}, לתפריט ראשי הקישו 1"
+    code = get_field(user, "קוד קהילה", "community_code", default="לא עודכן")
+    
+    msg = f"{prefix}שלום {name}, הכתובת הרשומה במערכת היא {addr}, קוד הקהילה הרשום במערכת הוא {code}. לחזרה לתפריט הראשי הקישו 1, לעדכון קוד הקהילה הקישו 2"
     return yemot_read(msg, "personal_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
 async def show_categories(session: dict, prefix: str = "") -> Response:
