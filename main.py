@@ -15,7 +15,7 @@ app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
 # הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5
-# כדי לפתוח את המערכת, שנו את הערך ל- True (או מחקו את הבדיקה ב-WELCOME)
+# כדי לפתוח את המערכת, שנו את הערך ל- True
 IS_SYSTEM_OPEN = False
 # ===================================================================
 
@@ -45,6 +45,7 @@ STEP_PARAM_MAP = {
     "REG_ID": ["reg_id", "ApiRealAnswer"],
     "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
     "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
+    "REG_COMMUNITY_CODE": ["reg_community_code", "ApiRealAnswer"],
     "PERSONAL_AREA": ["personal_choice", "ApiRealAnswer"],
     "MAIN_MENU": ["cat_choice", "ApiRealAnswer"],
     "KASHRUT_MENU": ["kashrut_choice", "ApiRealAnswer"],
@@ -230,7 +231,8 @@ def save_new_user_to_sheet(user_data: dict):
             "phone": str(user_data.get("phone", "")),
             "first_name": str(user_data.get("first_name", "")),
             "last_name": "",
-            "address": str(user_data.get("address", ""))
+            "address": str(user_data.get("address", "")),
+            "community_code": str(user_data.get("community_code", ""))
         }
         res = requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
         print(f" LOG: User register sheet response [Code {res.status_code}]: {res.text}", flush=True)
@@ -320,24 +322,27 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 break
                 
     user_input = clean_input(raw_user_input)
+    welcome_text = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5, לשלוחה שש הקישו 6"
     
     # ---------------------------------------------------------
     # שלב פתיחה
     # ---------------------------------------------------------
     if step == "WELCOME":
         if not user_input:
-            msg = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5"
-            return yemot_read(msg, "welcome_choice", max_digits=1, min_digits=1)
+            return yemot_read(welcome_text, "welcome_choice", max_digits=1, min_digits=1)
         
         # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5
+        # השמעת הודעה וחזרה מיידית לתפריט הראשי ללא המתנה להקשה
         if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
-            return yemot_read("מערכת ההזמנות סגורה עכשיו.", "welcome_choice", max_digits=1, min_digits=1)
+            clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
+            clean_welcome = clean_tts(welcome_text)
+            content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Number,no,no,*//"
+            return Response(content=content, media_type="text/plain; charset=utf-8")
 
         if user_input == "1":
             return Response(content="id_list_message=t-מעביר להודעות ועדכונים&go_to_folder=/1", media_type="text/plain; charset=utf-8")
             
         elif user_input == "2":
-            # כניסה לביצוע הזמנה - מחייב זיהוי!
             user = session.get("user") or CACHE["users"].get(phone)
             if user:
                 session["user"] = user
@@ -354,7 +359,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name")
             
         elif user_input == "4":
-            # כניסה לאזור אישי - מחייב זיהוי!
             user = session.get("user") or CACHE["users"].get(phone)
             if user:
                 session["user"] = user
@@ -365,16 +369,19 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", max_digits=10, min_digits=1)
                 
         elif user_input == "5":
-            # שמיעת קטלוג בלבד (ללא אפשרות הזמנה)
             session["filtered_products"] = CACHE["products"]
             session["product_index"] = 0
             session["step"] = "CATALOG_LOOP"
             return play_catalog_product(session)
             
+        elif user_input == "6":
+            return Response(content="id_list_message=t-מעביר לשלוחה שש&go_to_folder=/6", media_type="text/plain; charset=utf-8")
+
         elif user_input == "7":
             return Response(content="id_list_message=t-מעביר לשלוחה שבע&go_to_folder=/7", media_type="text/plain; charset=utf-8")
+            
         else:
-            return yemot_read("הקשה שגויה, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג הקישו 5", "welcome_choice", max_digits=1, min_digits=1)
+            return yemot_read(f"הקשה שגויה, {welcome_text}", "welcome_choice", max_digits=1, min_digits=1)
 
     elif step == "PERSONAL_AREA":
         if user_input == "1":
@@ -415,7 +422,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", max_digits=1, min_digits=1)
 
     # ---------------------------------------------------------
-    # תהליך הרשמה (ללא שלבי אישור מיותרים)
+    # תהליך הרשמה (שם -> ת.ז -> טלפון -> כתובת -> קוד קהילה)
     # ---------------------------------------------------------
     elif step == "REG_NAME":
         if not raw_user_input:
@@ -456,8 +463,15 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address")
 
         session["reg_data"]["address"] = transcribed_text
+        session["step"] = "REG_COMMUNITY_CODE"
+        return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", max_digits=10, min_digits=0)
+
+    elif step == "REG_COMMUNITY_CODE":
+        # קילוט קוד קהילה או דילוג (אם לא הוקש דבר או הוקש 0/*/#)
+        community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
+        session["reg_data"]["community_code"] = community_code
         
-        # השלמת הרשמה מיידית (ללא שלב אישור נוסף)
+        # השלמת הרשמה
         user_info = session["reg_data"]
         new_user = {
             "id_number": user_info.get("id_number"),
@@ -465,6 +479,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             "first_name": user_info.get("first_name"),
             "last_name": "",
             "address": user_info.get("address"),
+            "community_code": user_info.get("community_code"),
             "is_active": "TRUE"
         }
         CACHE["users"][user_info["id_number"]] = new_user
@@ -560,8 +575,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return play_catalog_product(session)
         elif user_input == "2":
             session["step"] = "WELCOME"
-            msg = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5"
-            return yemot_read(msg, "welcome_choice", max_digits=1, min_digits=1)
+            return yemot_read(welcome_text, "welcome_choice", max_digits=1, min_digits=1)
         else:
             return play_catalog_product(session, prefix="הקשה שגויה, ")
 
@@ -632,7 +646,6 @@ def show_personal_area(session: dict) -> Response:
     return yemot_read(msg, "personal_choice", max_digits=1, min_digits=1)
 
 async def show_categories(session: dict, prefix: str = "") -> Response:
-    # אבטחה: וידוא חובה שהמשתמש מחובר
     if not session.get("user"):
         session["auth_target"] = "MAIN_MENU"
         session["step"] = "AUTH"
