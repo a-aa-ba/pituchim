@@ -350,7 +350,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     # ---------------------------------------------------------
     if step == "WELCOME":
         if not user_input:
-            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,Digits,no,no,*/,,,,,,no")
+            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
         
         # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5
         if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
@@ -360,7 +360,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
         if user_input == "1":
-            return Response(content="id_list_message=t-מעביר להודעות ועדכונים&go_to_folder=/1", media_type="text/plain; charset=utf-8")
+            return Response(content="id_list_message=go_to_folder=/1", media_type="text/plain; charset=utf-8")
             
         elif user_input == "2":
             user = session.get("user") or CACHE["users"].get(phone)
@@ -372,7 +372,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             else:
                 session["auth_target"] = "MAIN_MENU"
                 session["step"] = "AUTH"
-                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
+                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,yes,no,*/")
                 
         elif user_input == "3":
             session["step"] = "REG_NAME"
@@ -386,7 +386,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             else:
                 session["auth_target"] = "PERSONAL_AREA"
                 session["step"] = "AUTH"
-                return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
+                return yemot_read("לכניסה לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
                 
         elif user_input == "5":
             session["filtered_products"] = CACHE["products"]
@@ -429,7 +429,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         else:
             session["step"] = "NOT_AUTHORIZED_CHOICE"
             background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", f"הוקש {user_input} - לא במורשים")
-            return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", "no,1,1,7,Digits,no,no,*/")
+            return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
     elif step == "NOT_AUTHORIZED_CHOICE":
         if user_input == "1":
@@ -439,7 +439,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             session["step"] = "REG_NAME"
             return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
         else:
-            return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,Digits,no,no,*/")
+            return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
     # ---------------------------------------------------------
     # תהליך הרשמה (שם -> ת.ז -> טלפון -> כתובת -> קוד קהילה)
@@ -533,7 +533,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 k_text = ""
                 for i, k in enumerate(kashruts, 1):
                     k_text += f"לכשרות {k} הקישו {i}, "
-                return yemot_read(k_text, "kashrut_choice", "no,1,1,7,Digits,no,no,*/")
+                return yemot_read(k_text, "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
             else:
                 return await show_categories(session, prefix="הקשה שגויה, ")
         except ValueError:
@@ -553,9 +553,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 session["selected_kashrut"] = kashruts[choice_idx]
                 return start_product_loop(session)
             else:
-                return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,Digits,no,no,*/")
+                return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
         except ValueError:
-            return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,Digits,no,no,*/")
+            return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
     # ---------------------------------------------------------
     # שלב 4: דפדוף במוצרים במכירות
@@ -593,7 +593,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return play_catalog_product(session)
         elif user_input == "2":
             session["step"] = "WELCOME"
-            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,Digits,no,no,*/")
+            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
         else:
             return play_catalog_product(session, prefix="הקשה שגויה, ")
 
@@ -619,7 +619,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             
             session["step"] = "AFTER_ADD_MENU"
             msg = "המוצר נוסף בהצלחה לסל הקניות שלך, למוצר הבא הקישו 1, למעבר לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9"
-            return yemot_read(msg, "after_add_choice", "no,1,1,7,Digits,no,no,*/")
+            return yemot_read(msg, "after_add_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
         except ValueError:
             return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד", "qty_input", "no,3,1,7,Digits,no,no,*/")
 
@@ -634,7 +634,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif user_input == "9":
             return initiate_checkout(session)
         else:
-            return yemot_read("הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9", "after_add_choice", "no,1,1,7,Digits,no,no,*/")
+            return yemot_read("הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9", "after_add_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
     # ---------------------------------------------------------
     # שלב 6: אישור דמי החזקת תחנת חלוקה (10 ש"ח)
@@ -649,7 +649,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         else:
             total_with_fee = session.get("total_sum_with_fee", 10)
             msg = f"הקשה שגויה, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
-            return yemot_read(msg, "checkout_confirm_choice", "no,1,1,7,Digits,no,no,*/")
+            return yemot_read(msg, "checkout_confirm_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
     return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
 
@@ -664,7 +664,7 @@ def show_personal_area(session: dict) -> Response:
     name = get_field(user, "שם פרטי ומשפחה", "שם פרטי", "first_name")
     addr = get_field(user, "כתובת", "address")
     msg = f"שלום {name}, הכתובת הרשומה במערכת היא {addr}, לתפריט ראשי הקישו 1"
-    return yemot_read(msg, "personal_choice", "no,1,1,7,Digits,no,no,*/")
+    return yemot_read(msg, "personal_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
 async def show_categories(session: dict, prefix: str = "") -> Response:
     if not session.get("user"):
@@ -680,7 +680,7 @@ async def show_categories(session: dict, prefix: str = "") -> Response:
         text += f"ל{c['category_name']} הקישו {i}, "
     text += "לסיום הקנייה ומעבר לתשלום הקישו 9"
     session["step"] = "MAIN_MENU"
-    return yemot_read(text, "cat_choice", "no,1,1,7,Digits,no,no,*/")
+    return yemot_read(text, "cat_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
 def start_product_loop(session: dict) -> Response:
     cat = str(session.get("selected_cat", "")).strip()
@@ -695,7 +695,7 @@ def start_product_loop(session: dict) -> Response:
     ]
     if not filtered:
         session["step"] = "MAIN_MENU"
-        return yemot_read("לא נמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", "no,1,1,7,Digits,no,no,*/")
+        return yemot_read("לא נמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
     session["filtered_products"] = filtered
     session["product_index"] = 0
     session["step"] = "PRODUCT_LOOP"
@@ -711,7 +711,7 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
         f"{prefix}מוצר: {p['name']}, מקט {p['sku']}, מחיר ליחידה {p['price']} שקלים,{notes_str} "
         f"להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9"
     )
-    return yemot_read(msg, "product_choice", "no,1,1,7,Digits,no,no,*/")
+    return yemot_read(msg, "product_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
 def play_catalog_product(session: dict, prefix: str = "") -> Response:
     products = session.get("filtered_products", [])
@@ -725,7 +725,7 @@ def play_catalog_product(session: dict, prefix: str = "") -> Response:
         f"{prefix}מוצר: {p['name']}, מקט {p['sku']}, מחיר ליחידה {p['price']} שקלים.{notes_str} "
         f"למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2"
     )
-    return yemot_read(msg, "catalog_choice", "no,1,1,7,Digits,no,no,*/")
+    return yemot_read(msg, "catalog_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
 # -------------------------------------------------------------------
 # 5. תחילת יציאה לתשלום: הודעה על 10 ש"ח + אישור (1 לאישור, 2 לביטול)
@@ -741,7 +741,7 @@ def initiate_checkout(session: dict) -> Response:
     session["step"] = "CONFIRM_CHECKOUT_FEE"
     
     msg = f"שימו לב, בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
-    return yemot_read(msg, "checkout_confirm_choice", "no,1,1,7,Digits,no,no,*/")
+    return yemot_read(msg, "checkout_confirm_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
 # -------------------------------------------------------------------
 # 6. מעבר סופי לסליקת אשראי
