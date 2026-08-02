@@ -14,12 +14,8 @@ import speech_recognition as sr
 app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
-# 1. הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
+# הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
 IS_SYSTEM_OPEN = True
-
-# 2. הגדרה להקראת קבצי שמע מוקלטים (True) או הקראת טקסט TTS (False)
-USE_AUDIO_FILES = False
-AUDIO_FOLDER = "messages"  # שם תיקיית הקלטות המערכת באנגלית (ללא רווחים!)
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
@@ -304,6 +300,7 @@ def log_transaction_to_sheet(session_data: dict):
     except Exception as e:
         pass
 
+# זיהוי מספר הקובץ לפי הטקסט או המשתנה
 def get_prompt_file_num(text: str, var_name: str) -> str:
     if "סגורה כעת" in text:
         return "002"
@@ -334,39 +331,25 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
     return PROMPT_FILE_MAP.get(var_name, "001")
 
 # -------------------------------------------------------------------
-# פונקציות מענה לימות המשיח
+# פונקציות מענה לימות המשיח - תחביר תקין עם נקודה (.) לבדיקת קובץ + נפילה ל-TTS
 # -------------------------------------------------------------------
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
-        file_num = get_prompt_file_num(clean_text, var_name)
-        sound_str = f"f-{AUDIO_FOLDER}/{file_num}"
-    else:
-        sound_str = f"t-{clean_text}"
-        
-    content = f"read={sound_str}={var_name},{options}"
+    file_num = get_prompt_file_num(clean_text, var_name)
+    # תחביר תקין בימות המשיח מופרד בנקודה: f-001.t-TEXT
+    content = f"read=f-{file_num}.t-{clean_text}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
-        file_num = get_prompt_file_num(clean_text, var_name)
-        sound_str = f"f-{AUDIO_FOLDER}/{file_num}"
-    else:
-        sound_str = f"t-{clean_text}"
-        
-    content = f"read={sound_str}={var_name},{options}&record_folder={record_folder}"
+    file_num = get_prompt_file_num(clean_text, var_name)
+    content = f"read=f-{file_num}.t-{clean_text}={var_name},{options}&record_folder={record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
-        file_num = get_prompt_file_num(clean_text, "")
-        sound_str = f"f-{AUDIO_FOLDER}/{file_num}"
-    else:
-        sound_str = f"t-{clean_text}"
-        
-    content = f"id_list_message={sound_str}"
+    file_num = get_prompt_file_num(clean_text, "")
+    content = f"id_list_message=f-{file_num}.t-{clean_text}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 # בדיקה האם קיימת ללקוח הזמנה פתוחה שלא שולמה
@@ -446,10 +429,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
             clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
             clean_welcome = clean_tts(welcome_text)
-            if USE_AUDIO_FILES:
-                content = f"id_list_message=f-{AUDIO_FOLDER}/002&read=f-{AUDIO_FOLDER}/001=welcome_choice,no,1,1,7,Digits,no,no,*/"
-            else:
-                content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
+            content = f"id_list_message=f-002.t-{clean_closed}&read=f-001.t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
         # מעבר מידי לשלוחה 1 ללא הודעה מקדימה
@@ -815,11 +795,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
             part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
             
-            if USE_AUDIO_FILES:
-                sound_chain = f"f-{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-{AUDIO_FOLDER}/023b"
-            else:
-                sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
-
+            sound_chain = f"f-023a.t-{clean_tts(part1_text)}.n-{total_with_fee}.f-023b.t-{clean_tts(part2_text)}"
             content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -917,11 +893,7 @@ def initiate_checkout(session: dict) -> Response:
     part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
     part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
     
-    if USE_AUDIO_FILES:
-        sound_chain = f"f-{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-{AUDIO_FOLDER}/023b"
-    else:
-        sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
-
+    sound_chain = f"f-023a.t-{clean_tts(part1_text)}.n-{total_with_fee}.f-023b.t-{clean_tts(part2_text)}"
     content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -955,10 +927,8 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     part1_text = "סך הכל לתשלום"
     part2_text = "שקלים מועברים כעת לסליקת אשראי"
     
-    if USE_AUDIO_FILES:
-        msg_chain = f"f-{AUDIO_FOLDER}/025a.n-{total_sum}.f-{AUDIO_FOLDER}/025b"
-    else:
-        msg_chain = f"t-{clean_tts(part1_text)}.n-{total_sum}.t-{clean_tts(part2_text)}"
+    # שרשור תקין של ימות המשיח עם נקודה: קובץ 025a + הקראת מספר + קובץ 025b
+    msg_chain = f"f-025a.t-{clean_tts(part1_text)}.n-{total_sum}.f-025b.t-{clean_tts(part2_text)}"
     
     # שליחת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY מפורשות לסליקת תשלום אחד בלבד
     credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY},,,,{CREDIT_CARD_REGISTER_NO}"
