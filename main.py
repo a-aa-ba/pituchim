@@ -336,7 +336,6 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
     file_num = get_prompt_file_num(clean_text, var_name)
-    # ימות המשיח בודקת האם הקובץ 001.wav קיים בתיקייה "הודעות מערכת". אם לא - מקריאה את ה-TTS
     content = f"read=f-הודעות מערכת/{file_num}:t-{clean_text}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -520,7 +519,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         return show_personal_area(session, prefix="קוד הקהילה עודכן בהצלחה, ")
 
     # ---------------------------------------------------------
-    # שלב בחירה: שחזור הזמנה קודמת שלא שולמה
+    # שלבבחירה: שחזור הזמנה קודמת שלא שולמה
     # ---------------------------------------------------------
     elif step == "RESTORE_CART_CHOICE":
         user = session.get("user") or {}
@@ -792,8 +791,13 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return await show_categories(session, prefix="ההזמנה בוטלה, מעביר אותך חזרה לתפריט, ")
         else:
             total_with_fee = session.get("total_sum_with_fee", 10)
-            msg = f"הקשה שגויה, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
-            return yemot_read(msg, "checkout_confirm_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+            part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
+            part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
+            
+            # שזירת ההודעות 023a + n-סכום + 023b
+            sound_chain = f"f-הודעות מערכת/023a:t-{clean_tts(part1_text)}.n-{total_with_fee}.f-הודעות מערכת/023b:t-{clean_tts(part2_text)}"
+            content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
+            return Response(content=content, media_type="text/plain; charset=utf-8")
 
     return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
 
@@ -886,8 +890,13 @@ def initiate_checkout(session: dict) -> Response:
     session["total_sum_with_fee"] = total_with_fee
     session["step"] = "CONFIRM_CHECKOUT_FEE"
     
-    msg = f"שימו לב, בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים, סך הכל לתשלום כולל דמי החזקה הוא {total_with_fee} שקלים, לאישור ומעבר לתשלום הקישו 1, לביטול ההזמנה הקישו 2"
-    return yemot_read(msg, "checkout_confirm_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+    part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
+    part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
+    
+    # שזירת ההודעות 023a + n-סכום + 023b
+    sound_chain = f"f-הודעות מערכת/023a:t-{clean_tts(part1_text)}.n-{total_with_fee}.f-הודעות מערכת/023b:t-{clean_tts(part2_text)}"
+    content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 # -------------------------------------------------------------------
 # 6. מעבר סופי לסליקת אשראי - תשלום 1 בלבד
@@ -916,10 +925,14 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     if call_id in SESSIONS:
         del SESSIONS[call_id]
         
-    msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
+    part1_text = "סך הכל לתשלום"
+    part2_text = "שקלים מועברים כעת לסליקת אשראי"
+    
+    # שזירת ההודעות 025a + n-סכום + 025b
+    msg_chain = f"f-הודעות מערכת/025a:t-{clean_tts(part1_text)}.n-{total_sum}.f-הודעות מערכת/025b:t-{clean_tts(part2_text)}"
     
     # שליחת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY מפורשות לסליקת תשלום אחד בלבד
     credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY},,,,{CREDIT_CARD_REGISTER_NO}"
     
-    content = f"id_list_message=f-הודעות מערכת/025:t-{msg}&{credit_card_cmd}"
+    content = f"id_list_message={msg_chain}&{credit_card_cmd}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
