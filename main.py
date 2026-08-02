@@ -25,8 +25,8 @@ APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 # הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס, תשלום 1 בלבד)
 CREDIT_CARD_PROVIDER = "nedarim_plus"
 CREDIT_CARD_REGISTER_NO = "4001388"
-CREDIT_CARD_MAX_PAYMENTS = "1"
-CREDIT_CARD_CURRENCY = "1"
+CREDIT_CARD_MAX_PAYMENTS = "1"  # תשלום 1 בלבד
+CREDIT_CARD_CURRENCY = os.environ.get("CREDIT_CARD_CURRENCY", "1")  # 1 = שקל
 
 CACHE = {
     "users": {},
@@ -35,6 +35,7 @@ CACHE = {
 }
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
+SAVED_CARTS: Dict[str, list] = {}  # שמירת סלי קניות פתוחים של משתמשים
 
 STEP_PARAM_MAP = {
     "WELCOME": ["welcome_choice", "ApiRealAnswer"],
@@ -47,6 +48,7 @@ STEP_PARAM_MAP = {
     "REG_COMMUNITY_CODE": ["reg_community_code", "ApiRealAnswer"],
     "PERSONAL_AREA": ["personal_choice", "ApiRealAnswer"],
     "UPDATE_COMMUNITY_CODE": ["new_community_code", "ApiRealAnswer"],
+    "RESTORE_CART_CHOICE": ["restore_cart_choice", "ApiRealAnswer"],
     "MAIN_MENU": ["cat_choice", "ApiRealAnswer"],
     "KASHRUT_MENU": ["kashrut_choice", "ApiRealAnswer"],
     "PRODUCT_LOOP": ["product_choice", "ApiRealAnswer"],
@@ -155,6 +157,8 @@ def clean_tts(text: str) -> str:
     return text.strip()
 
 def get_field(item: dict, *keys, default=""):
+    if not item or not isinstance(item, dict):
+        return default
     for k in keys:
         if k in item and item[k] is not None and str(item[k]).strip() != "":
             return item[k]
@@ -276,14 +280,13 @@ def log_transaction_to_sheet(session_data: dict):
         pass
 
 # -------------------------------------------------------------------
-# פונקציית הקראה - מקבלת שורת פרמטרים אחת של ימות המשיח כטקסט
+# פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
     content = f"read=t-{clean_text}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-# הקלטות התמלול נשמרות בתיקיית "הקלטות" בשלוחה הראשית
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
     content = f"read=t-{clean_text}={var_name},{options}&record_folder={record_folder}"
@@ -293,6 +296,19 @@ def yemot_msg(text: str) -> Response:
     clean_text = clean_tts(text)
     content = f"id_list_message=t-{clean_text}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
+
+# בדיקה האם קיימת ללקוח הזמנה פתוחה שלא שולמה
+async def check_abandoned_cart_or_proceed(session: dict, background_tasks: BackgroundTasks) -> Response:
+    user = session.get("user", {})
+    user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or session.get("phone")
+    
+    if user_id and SAVED_CARTS.get(user_id):
+        session["step"] = "RESTORE_CART_CHOICE"
+        msg = "המערכת מזהה כי יש לך הזמנה פתוחה במערכת, להמשך קנייה זו הקישו 1, להתחלת קנייה חדשה הקישו 2"
+        return yemot_read(msg, "restore_cart_choice", "no,1,1,7,Digits,no,no,*/")
+    else:
+        session["step"] = "MAIN_MENU"
+        return await show_categories(session)
 
 # -------------------------------------------------------------------
 # 4. Webhook ראשי
@@ -369,9 +385,8 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             user = session.get("user") or CACHE["users"].get(phone)
             if user:
                 session["user"] = user
-                session["step"] = "MAIN_MENU"
                 background_tasks.add_task(log_general_event, call_id, phone, "זיהוי אוטומטי", f"זוהה לפי טלפון {phone}")
-                return await show_categories(session)
+                return await check_abandoned_cart_or_proceed(session, background_tasks)
             else:
                 session["auth_target"] = "MAIN_MENU"
                 session["step"] = "AUTH"
@@ -450,6 +465,29 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         return show_personal_area(session, prefix="קוד הקהילה עודכן בהצלחה, ")
 
     # ---------------------------------------------------------
+    # שלב בחירה: שחזור הזמנה קודמת שלא שולמה
+    # ---------------------------------------------------------
+    elif step == "RESTORE_CART_CHOICE":
+        user = session.get("user") or {}
+        user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
+        
+        if user_input == "1":
+            # להמשך קנייה זו - שחזור סל קודם
+            session["cart"] = SAVED_CARTS.get(user_id, [])
+            session["step"] = "MAIN_MENU"
+            return await show_categories(session, prefix="ממשיכים את ההזמנה הקודמת, ")
+        elif user_input == "2":
+            # להתחלת קנייה חדשה - איפוס סל
+            session["cart"] = []
+            if user_id in SAVED_CARTS:
+                del SAVED_CARTS[user_id]
+            session["step"] = "MAIN_MENU"
+            return await show_categories(session, prefix="מתחילים הזמנה חדשה, ")
+        else:
+            msg = "הקשה שגויה, המערכת מזהה כי יש לך הזמנה פתוחה במערכת, להמשך קנייה זו הקישו 1, להתחלת קנייה חדשה הקישו 2"
+            return yemot_read(msg, "restore_cart_choice", "no,1,1,7,Digits,no,no,*/")
+
+    # ---------------------------------------------------------
     # שלב 1: זיהוי מורשים
     # ---------------------------------------------------------
     elif step == "AUTH":
@@ -464,8 +502,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if target == "PERSONAL_AREA":
                 return show_personal_area(session)
             else:
-                session["step"] = "MAIN_MENU"
-                return await show_categories(session)
+                return await check_abandoned_cart_or_proceed(session, background_tasks)
         else:
             session["step"] = "NOT_AUTHORIZED_CHOICE"
             background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", f"הוקש {user_input} - לא במורשים")
@@ -638,7 +675,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return play_catalog_product(session, prefix="הקשה שגויה, ")
 
     # ---------------------------------------------------------
-    # שלב 5: הזנת כמות
+    # שלב 5: הזנת כמות (שמירת הסל בזמן אמת עבור המשתמש)
     # ---------------------------------------------------------
     elif step == "QTY_INPUT":
         try:
@@ -655,6 +692,13 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 "qty": qty,
                 "total": total_price
             })
+            
+            # עדכון סל פתוח בזיכרון בזמן אמת
+            user = session.get("user") or {}
+            user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
+            if user_id:
+                SAVED_CARTS[user_id] = session["cart"]
+
             background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"נוסף {p['name']} כמות {qty}")
             
             session["step"] = "AFTER_ADD_MENU"
@@ -684,6 +728,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return finish_checkout(session, background_tasks)
         elif user_input == "2":
             session["cart"] = []
+            user = session.get("user") or {}
+            user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
+            if user_id and user_id in SAVED_CARTS:
+                del SAVED_CARTS[user_id]
+                
             session["step"] = "MAIN_MENU"
             return await show_categories(session, prefix="ההזמנה בוטלה, מעביר אותך חזרה לתפריט, ")
         else:
@@ -786,7 +835,7 @@ def initiate_checkout(session: dict) -> Response:
     return yemot_read(msg, "checkout_confirm_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
 # -------------------------------------------------------------------
-# 6. מעבר סופי לסליקת אשראי
+# 6. מעבר סופי לסליקת אשראי - תשלום 1 בלבד
 # -------------------------------------------------------------------
 def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Response:
     cart = session.get("cart", [])
@@ -800,6 +849,12 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     cart_sum = int(sum(item["total"] for item in cart))
     total_sum = session.get("total_sum_with_fee") or (cart_sum + 10)
     
+    # ניקוי הסל הפתוח של המשתמש מזיכרון המערכת לאחר השלמת הזמנה
+    user = session.get("user") or {}
+    user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
+    if user_id and user_id in SAVED_CARTS:
+        del SAVED_CARTS[user_id]
+        
     background_tasks.add_task(log_transaction_to_sheet, session)
     background_tasks.add_task(log_general_event, call_id, phone, "הזמנה הושלמה - מעבר לסליקה", f"סה\"כ כולל דמי החזקה {total_sum} ש\"ח")
     
@@ -808,7 +863,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
         
     msg = clean_tts(f"סך הכל לתשלום {total_sum} שקלים, מועברים כעת לסליקת אשראי")
     
-     # הוספת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY בצורה מפורשת לשורה:
+    # שליחת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY מפורשות לסליקת תשלום אחד בלבד
     credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY},,,,{CREDIT_CARD_REGISTER_NO}"
     
     content = f"id_list_message=t-{msg}&{credit_card_cmd}"
