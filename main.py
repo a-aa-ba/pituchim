@@ -5,6 +5,7 @@ import requests
 import subprocess
 import traceback
 import urllib.parse
+import time
 from datetime import datetime
 from typing import Dict, Any
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -53,9 +54,11 @@ STEP_PARAM_MAP = {
     "AUTH": ["auth_id", "ApiRealAnswer"],
     "NOT_AUTHORIZED_CHOICE": ["unauth_choice", "ApiRealAnswer"],
     "REG_NAME": ["reg_name", "my_rec", "ApiRealAnswer"],
+    "CONFIRM_REG_NAME": ["confirm_reg_name", "ApiRealAnswer"],
     "REG_ID": ["reg_id", "ApiRealAnswer"],
     "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
     "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
+    "CONFIRM_REG_ADDRESS": ["confirm_reg_address", "ApiRealAnswer"],
     "REG_COMMUNITY_CODE": ["reg_community_code", "ApiRealAnswer"],
     "PERSONAL_AREA": ["personal_choice", "ApiRealAnswer"],
     "UPDATE_COMMUNITY_CODE": ["new_community_code", "ApiRealAnswer"],
@@ -74,9 +77,11 @@ PROMPT_FILE_MAP = {
     "auth_id": "003",
     "unauth_choice": "004",
     "reg_name": "005",
+    "confirm_reg_name": "006",
     "reg_id": "007",
     "reg_phone": "009",
     "reg_address": "010",
+    "confirm_reg_address": "011",
     "reg_community_code": "012",
     "personal_choice": "014",
     "new_community_code": "015",
@@ -117,26 +122,56 @@ def convert_audio_to_pcm_wav(input_path, output_path):
 # 2. הורדת הקובץ מימות המשיח + תמלול בעברית
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
+    start_time = time.time()
     if not my_rec_path or not isinstance(my_rec_path, str):
+        print("LOG TRANSCRIBE: empty or invalid path", flush=True)
         return ""
 
-    active_token = token or YEMOT_TOKEN
-    clean_path = my_rec_path.strip()
+    active_token = token if (token and ":" in str(token)) else YEMOT_TOKEN
+    clean_path = str(my_rec_path).strip()
+
+    if clean_path.startswith("ivr2:"):
+        clean_path = clean_path[5:]
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
-    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
+    candidate_paths = [clean_path]
+    if clean_path.startswith("/הקלטות/"):
+        candidate_paths.append(clean_path.replace("/הקלטות/", "/"))
+    else:
+        candidate_paths.append(f"/הקלטות{clean_path}")
 
-    temp_audio = f"downloaded_{os.getpid()}.file"
-    converted_wav = f"converted_{os.getpid()}.wav"
+    # כותרת מזהה מול ימות המשיח לפי התיעוד בעמוד 4
+    headers = {
+        "User-Agent": "yemot-core-api/1.0"
+    }
+
+    temp_audio = f"dl_{os.getpid()}_{int(time.time())}.file"
+    converted_wav = f"cv_{os.getpid()}_{int(time.time())}.wav"
+
+    downloaded_content = None
+    for path_cand in candidate_paths:
+        for domain in ["https://www.call2all.co.il", "https://ym.call2all.co.il"]:
+            try:
+                enc_path = urllib.parse.quote(f"ivr2:{path_cand}", safe=":/")
+                url = f"{domain}/ym/api/DownloadFile?token={active_token}&path={enc_path}"
+                print(f"LOG TRANSCRIBE: Requesting {url}", flush=True)
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200 and len(res.content) > 100 and not res.content.startswith(b'<') and not res.content.startswith(b'{'):
+                    downloaded_content = res.content
+                    break
+            except Exception as err:
+                print(f"LOG TRANSCRIBE DL WARN: {err}", flush=True)
+        if downloaded_content:
+            break
+
+    if not downloaded_content:
+        print(f"LOG TRANSCRIBE ERROR: Download failed for path {clean_path}", flush=True)
+        return ""
 
     try:
-        res = requests.get(audio_url, timeout=30)
-        if res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
-            return ""
-
         with open(temp_audio, "wb") as f:
-            f.write(res.content)
+            f.write(downloaded_content)
 
         if not convert_audio_to_pcm_wav(temp_audio, converted_wav):
             target_wav = temp_audio
@@ -144,14 +179,19 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             target_wav = converted_wav
 
         recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 300
+        recognizer.dynamic_energy_threshold = True
+
         with sr.AudioFile(target_wav) as source:
             audio_data = recognizer.record(source)
             text = recognizer.recognize_google(audio_data, language='he-IL')
 
+        elapsed = time.time() - start_time
+        print(f"LOG TRANSCRIBE SUCCESS ({elapsed:.2f}s): '{text}'", flush=True)
         return text.strip() if text else ""
 
     except Exception as e:
-        print(f"LOG ERROR בתמלול: {e}", flush=True)
+        print(f"LOG TRANSCRIBE RECOGNITION ERROR: {e}", flush=True)
         return ""
     finally:
         if os.path.exists(temp_audio):
@@ -316,9 +356,13 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
         return "002"
     if "לא הצלחנו לפענח" in text and "שמכם" in text:
         return "006"
+    if "שמכם נקלט כ" in text:
+        return "006"
     if "כבר רשום" in text:
         return "008"
     if "לא הצלחנו לפענח" in text and "כתובת" in text:
+        return "011"
+    if "הכתובת נקלטה כ" in text:
         return "011"
     if "הרשמתכם הושלמה" in text:
         return "013"
@@ -607,7 +651,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
         # ---------------------------------------------------------
-        # תהליך הרשמה (שם -> ת.ז -> טלפון -> כתובת -> קוד קהילה)
+        # תהליך הרשמה (שם -> אישור שם -> ת.ז -> טלפון -> כתובת -> אישור כתובת -> קוד קהילה)
         # ---------------------------------------------------------
         elif step == "REG_NAME":
             if not raw_user_input:
@@ -618,8 +662,17 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
                 
             session["reg_data"]["first_name"] = transcribed_text
-            session["step"] = "REG_ID"
-            return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+            session["step"] = "CONFIRM_REG_NAME"
+            msg = f"שמכם נקלט כ {transcribed_text}, לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            return yemot_read(msg, "confirm_reg_name", "no,1,1,7,Digits,no,no,*/")
+
+        elif step == "CONFIRM_REG_NAME":
+            if user_input == "1":
+                session["step"] = "REG_ID"
+                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+            else:
+                session["step"] = "REG_NAME"
+                return yemot_read_record("אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
 
         elif step == "REG_ID":
             if not user_input:
@@ -648,8 +701,17 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
 
             session["reg_data"]["address"] = transcribed_text
-            session["step"] = "REG_COMMUNITY_CODE"
-            return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", "no,6,0,7,Digits,no,no,*/")
+            session["step"] = "CONFIRM_REG_ADDRESS"
+            msg = f"הכתובת נקלטה כ {transcribed_text}, לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            return yemot_read(msg, "confirm_reg_address", "no,1,1,7,Digits,no,no,*/")
+
+        elif step == "CONFIRM_REG_ADDRESS":
+            if user_input == "1":
+                session["step"] = "REG_COMMUNITY_CODE"
+                return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", "no,6,0,7,Digits,no,no,*/")
+            else:
+                session["step"] = "REG_ADDRESS"
+                return yemot_read_record("אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
 
         elif step == "REG_COMMUNITY_CODE":
             community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
