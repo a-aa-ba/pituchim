@@ -25,7 +25,6 @@ ALLOWED_PHONES_WHEN_CLOSED = [
 ]
 
 # 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
-# כשזה מוגדר True - תושמע אך ורק ההקלטה שלך ללא הקראת טקסט אחריה!
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
@@ -115,7 +114,7 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מתוקן)
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מואץ ומוגן מתקלות)
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     if not my_rec_path or not isinstance(my_rec_path, str):
@@ -131,7 +130,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
-    # ניסיון הורדה מכמה נתיבים אפשריים (הן ישיר והן בתוך תיקיית הקלטות)
+    # בדיקת נתיבים אפשריים
     candidate_paths = []
     if clean_path.startswith("/הקלטות/"):
         candidate_paths.append(clean_path)
@@ -140,8 +139,8 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         candidate_paths.append(clean_path)
         candidate_paths.append(f"/הקלטות{clean_path}")
 
-    temp_audio = f"downloaded_{os.getpid()}.file"
-    converted_wav = f"converted_{os.getpid()}.wav"
+    temp_audio = f"downloaded_{os.getpid()}_{datetime.now().strftime('%H%M%S')}.file"
+    converted_wav = f"converted_{os.getpid()}_{datetime.now().strftime('%H%M%S')}.wav"
 
     res = None
     for path_candidate in candidate_paths:
@@ -149,7 +148,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_p}"
         try:
             print(f"LOG TRANSCRIBE: Downloading audio from {audio_url}", flush=True)
-            res = requests.get(audio_url, timeout=30)
+            res = requests.get(audio_url, timeout=5)  # טיימאאוט קצר של 5 שניות למניעת ניתוקי API
             if res.status_code == 200 and not res.content.startswith(b'<') and not res.content.startswith(b'{'):
                 break
         except Exception as err:
@@ -157,7 +156,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
 
     try:
         if not res or res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
-            error_body = res.text[:200] if res else "No response"
+            error_body = res.text[:100] if res else "No response"
             print(f"LOG TRANSCRIBE ERROR: Download failed. Content: {error_body}", flush=True)
             return ""
 
@@ -178,7 +177,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         return text.strip() if text else ""
 
     except Exception as e:
-        print(f"LOG ERROR בתמלול: {e}\n{traceback.format_exc()}", flush=True)
+        print(f"LOG ERROR בתמלול: {e}", flush=True)
         return ""
     finally:
         if os.path.exists(temp_audio):
@@ -425,444 +424,449 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
         return Response(content="OK", media_type="text/plain")
 
-    params = dict(request.query_params)
-    if request.method == "POST":
-        form_data = await request.form()
-        params.update(dict(form_data))
-        
-    call_id = params.get("ApiCallId") or params.get("phone") or "default_session"
-    phone = params.get("ApiPhone", "").strip()
-    token = params.get("token") or YEMOT_TOKEN
-    
-    if call_id not in SESSIONS:
-        SESSIONS[call_id] = {
-            "step": "WELCOME",
-            "user": None,
-            "cart": [],
-            "selected_cat": None,
-            "selected_kashrut": None,
-            "filtered_products": [],
-            "product_index": 0,
-            "pending_qty": 0,
-            "call_id": call_id,
-            "phone": phone,
-            "reg_data": {},
-            "auth_target": "MAIN_MENU"
-        }
-        background_tasks.add_task(log_general_event, call_id, phone, "כניסה לשיחה", "התחלת שיחה חדשה")
-        
-    session = SESSIONS[call_id]
-    step = session["step"]
-    
-    raw_user_input = ""
-    expected_keys = STEP_PARAM_MAP.get(step, [])
-    for key in expected_keys:
-        if params.get(key):
-            raw_user_input = str(params.get(key)).strip()
-            break
+    try:
+        params = dict(request.query_params)
+        if request.method == "POST":
+            form_data = await request.form()
+            params.update(dict(form_data))
             
-    if not raw_user_input:
-        for k, v in params.items():
-            if not k.startswith("Api") and v:
-                raw_user_input = str(v).strip()
+        call_id = params.get("ApiCallId") or params.get("phone") or "default_session"
+        phone = params.get("ApiPhone", "").strip()
+        token = params.get("token") or YEMOT_TOKEN
+        
+        if call_id not in SESSIONS:
+            SESSIONS[call_id] = {
+                "step": "WELCOME",
+                "user": None,
+                "cart": [],
+                "selected_cat": None,
+                "selected_kashrut": None,
+                "filtered_products": [],
+                "product_index": 0,
+                "pending_qty": 0,
+                "call_id": call_id,
+                "phone": phone,
+                "reg_data": {},
+                "auth_target": "MAIN_MENU"
+            }
+            background_tasks.add_task(log_general_event, call_id, phone, "כניסה לשיחה", "התחלת שיחה חדשה")
+            
+        session = SESSIONS[call_id]
+        step = session["step"]
+        
+        raw_user_input = ""
+        expected_keys = STEP_PARAM_MAP.get(step, [])
+        for key in expected_keys:
+            if params.get(key):
+                raw_user_input = str(params.get(key)).strip()
                 break
                 
-    user_input = clean_input(raw_user_input)
-    welcome_text = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5, לרישום לקבלת צינתוק כשעולה הודעה חדשה הקישו 6"
-    
-    # ---------------------------------------------------------
-    # שלב פתיחה (תפריט ראשי)
-    # ---------------------------------------------------------
-    if step == "WELCOME":
-        if not user_input:
-            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-        
-        # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5 (חוסם את כולם פרט למספרים מורשים ב-ALLOWED_PHONES_WHEN_CLOSED)
-        user_obj = session.get("user") or CACHE["users"].get(phone) or {}
-        user_id = get_field(user_obj, "תעודת זהות", "id_number") or get_field(user_obj, "מספר טלפון", "phone") or phone
-        is_vip = (phone in ALLOWED_PHONES_WHEN_CLOSED) or (user_id in ALLOWED_PHONES_WHEN_CLOSED)
-
-        if not IS_SYSTEM_OPEN and not is_vip and user_input in ["2", "3", "4", "5"]:
-            clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
-            clean_welcome = clean_tts(welcome_text)
-            if USE_AUDIO_FILES:
-                content = f"id_list_message=f-/{AUDIO_FOLDER}/002&read=f-/{AUDIO_FOLDER}/001=welcome_choice,no,1,1,7,Digits,no,no,*/"
-            else:
-                content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
-            return Response(content=content, media_type="text/plain; charset=utf-8")
-
-        # מעבר מידי לשלוחה 1 ללא הודעה מקדימה
-        if user_input == "1":
-            return Response(content="go_to_folder=/1", media_type="text/plain; charset=utf-8")
-            
-        elif user_input == "2":
-            user = session.get("user") or CACHE["users"].get(phone)
-            if user:
-                session["user"] = user
-                background_tasks.add_task(log_general_event, call_id, phone, "זיהוי אוטומטי", f"זוהה לפי טלפון {phone}")
-                return await check_abandoned_cart_or_proceed(session, background_tasks)
-            else:
-                session["auth_target"] = "MAIN_MENU"
-                session["step"] = "AUTH"
-                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,yes,no,*/")
-                
-        elif user_input == "3":
-            session["step"] = "REG_NAME"
-            return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
-            
-        elif user_input == "4":
-            user = session.get("user") or CACHE["users"].get(phone)
-            if user:
-                session["user"] = user
-                return show_personal_area(session)
-            else:
-                session["auth_target"] = "PERSONAL_AREA"
-                session["step"] = "AUTH"
-                return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
-                
-        elif user_input == "5":
-            session["filtered_products"] = CACHE["products"]
-            session["product_index"] = 0
-            session["step"] = "CATALOG_LOOP"
-            return play_catalog_product(session)
-            
-        # מעבר מידי לשלוחה 6 ללא הודעה מקדימה
-        elif user_input == "6":
-            return Response(content="go_to_folder=/6", media_type="text/plain; charset=utf-8")
-
-        # מעבר מידי לשלוחה 7 ללא הודעה מקדימה
-        elif user_input == "7":
-            return Response(content="go_to_folder=/7", media_type="text/plain; charset=utf-8")
-            
-        else:
-            return yemot_read(f"הקשה שגויה, {welcome_text}", "welcome_choice", "no,1,1,7,Digits,no,no,*/")
-
-    # ---------------------------------------------------------
-    # שלב אזור אישי
-    # ---------------------------------------------------------
-    elif step == "PERSONAL_AREA":
-        if user_input == "1":
-            session["step"] = "WELCOME"
-            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-        elif user_input == "2":
-            session["step"] = "UPDATE_COMMUNITY_CODE"
-            return yemot_read("אנא הקישו את קוד הקהילה החדש שלכם ולאחר מכן הקישו סולמית", "new_community_code", "no,6,1,7,Digits,no,no,*/")
-        else:
-            return show_personal_area(session)
-
-    elif step == "UPDATE_COMMUNITY_CODE":
-        if not user_input:
-            return yemot_read("אנא הקישו את קוד הקהילה החדש שלכם ולאחר מכן הקישו סולמית", "new_community_code", "no,6,1,7,Digits,no,no,*/")
-            
-        new_code = user_input
-        user = session.get("user") or {}
-        user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or session.get("phone")
-        
-        if APPS_SCRIPT_URL:
-            try:
-                payload = {
-                    "type": "update_community_code",
-                    "id_number": str(user_id),
-                    "phone": str(session.get("phone", "")),
-                    "community_code": str(new_code)
-                }
-                background_tasks.add_task(requests.post, APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-            except Exception:
-                pass
-
-        user["community_code"] = new_code
-        if user_id in CACHE["users"]:
-            CACHE["users"][user_id]["community_code"] = new_code
-        if session.get("phone") in CACHE["users"]:
-            CACHE["users"][session["phone"]]["community_code"] = new_code
-            
-        return show_personal_area(session, prefix="קוד הקהילה עודכן בהצלחה, ")
-
-    # ---------------------------------------------------------
-    # שלב בחירה: שחזור הזמנה קודמת שלא שולמה
-    # ---------------------------------------------------------
-    elif step == "RESTORE_CART_CHOICE":
-        user = session.get("user") or {}
-        user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
-        
-        if user_input == "1":
-            # להמשך קנייה זו - שחזור סל קודם
-            session["cart"] = SAVED_CARTS.get(user_id, [])
-            session["step"] = "MAIN_MENU"
-            return await show_categories(session, prefix="ממשיכים את ההזמנה הקודמת, ")
-        elif user_input == "2":
-            # להתחלת קנייה חדשה - איפוס סל
-            session["cart"] = []
-            if user_id in SAVED_CARTS:
-                del SAVED_CARTS[user_id]
-            session["step"] = "MAIN_MENU"
-            return await show_categories(session, prefix="מתחילים הזמנה חדשה, ")
-        else:
-            msg = "הקשה שגויה, המערכת מזהה כי יש לך הזמנה פתוחה במערכת, להמשך קנייה זו הקישו 1, להתחלת קנייה חדשה הקישו 2"
-            return yemot_read(msg, "restore_cart_choice", "no,1,1,7,Digits,no,no,*/")
-
-    # ---------------------------------------------------------
-    # שלב 1: זיהוי מורשים
-    # ---------------------------------------------------------
-    elif step == "AUTH":
-        if not user_input:
-            return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
-        
-        if user_input in CACHE["users"]:
-            session["user"] = CACHE["users"][user_input]
-            background_tasks.add_task(log_general_event, call_id, phone, "זיהוי מוצלח", f"זוהה לפי {user_input}")
-            
-            target = session.get("auth_target", "MAIN_MENU")
-            if target == "PERSONAL_AREA":
-                return show_personal_area(session)
-            else:
-                return await check_abandoned_cart_or_proceed(session, background_tasks)
-        else:
-            session["step"] = "NOT_AUTHORIZED_CHOICE"
-            background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", f"הוקש {user_input} - לא במורשים")
-            return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-
-    elif step == "NOT_AUTHORIZED_CHOICE":
-        if user_input == "1":
-            session["step"] = "AUTH"
-            return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,1,7,Digits,no,no,*/")
-        elif user_input == "2":
-            session["step"] = "REG_NAME"
-            return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
-        else:
-            return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-
-    # ---------------------------------------------------------
-    # תהליך הרשמה (שם -> ת.ז -> טלפון -> כתובת -> קוד קהילה)
-    # ---------------------------------------------------------
-    elif step == "REG_NAME":
         if not raw_user_input:
-            return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+            for k, v in params.items():
+                if not k.startswith("Api") and v:
+                    raw_user_input = str(v).strip()
+                    break
+                    
+        user_input = clean_input(raw_user_input)
+        welcome_text = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5, לרישום לקבלת צינתוק כשעולה הודעה חדשה הקישו 6"
         
-        transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
-        if not transcribed_text:
-            return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+        # ---------------------------------------------------------
+        # שלב פתיחה (תפריט ראשי)
+        # ---------------------------------------------------------
+        if step == "WELCOME":
+            if not user_input:
+                return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
             
-        session["reg_data"]["first_name"] = transcribed_text
-        session["step"] = "REG_ID"
-        return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+            # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5 (חוסם את כולם פרט למספרים מורשים ב-ALLOWED_PHONES_WHEN_CLOSED)
+            user_obj = session.get("user") or CACHE["users"].get(phone) or {}
+            user_id = get_field(user_obj, "תעודת זהות", "id_number") or get_field(user_obj, "מספר טלפון", "phone") or phone
+            is_vip = (phone in ALLOWED_PHONES_WHEN_CLOSED) or (user_id in ALLOWED_PHONES_WHEN_CLOSED)
 
-    elif step == "REG_ID":
-        if not user_input:
+            if not IS_SYSTEM_OPEN and not is_vip and user_input in ["2", "3", "4", "5"]:
+                clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
+                clean_welcome = clean_tts(welcome_text)
+                if USE_AUDIO_FILES:
+                    content = f"id_list_message=f-/{AUDIO_FOLDER}/002&read=f-/{AUDIO_FOLDER}/001=welcome_choice,no,1,1,7,Digits,no,no,*/"
+                else:
+                    content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
+                return Response(content=content, media_type="text/plain; charset=utf-8")
+
+            # מעבר מידי לשלוחה 1 ללא הודעה מקדימה
+            if user_input == "1":
+                return Response(content="go_to_folder=/1", media_type="text/plain; charset=utf-8")
+                
+            elif user_input == "2":
+                user = session.get("user") or CACHE["users"].get(phone)
+                if user:
+                    session["user"] = user
+                    background_tasks.add_task(log_general_event, call_id, phone, "זיהוי אוטומטי", f"זוהה לפי טלפון {phone}")
+                    return await check_abandoned_cart_or_proceed(session, background_tasks)
+                else:
+                    session["auth_target"] = "MAIN_MENU"
+                    session["step"] = "AUTH"
+                    return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,yes,no,*/")
+                    
+            elif user_input == "3":
+                session["step"] = "REG_NAME"
+                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                
+            elif user_input == "4":
+                user = session.get("user") or CACHE["users"].get(phone)
+                if user:
+                    session["user"] = user
+                    return show_personal_area(session)
+                else:
+                    session["auth_target"] = "PERSONAL_AREA"
+                    session["step"] = "AUTH"
+                    return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
+                    
+            elif user_input == "5":
+                session["filtered_products"] = CACHE["products"]
+                session["product_index"] = 0
+                session["step"] = "CATALOG_LOOP"
+                return play_catalog_product(session)
+                
+            # מעבר מידי לשלוחה 6 ללא הודעה מקדימה
+            elif user_input == "6":
+                return Response(content="go_to_folder=/6", media_type="text/plain; charset=utf-8")
+
+            # מעבר מידי לשלוחה 7 ללא הודעה מקדימה
+            elif user_input == "7":
+                return Response(content="go_to_folder=/7", media_type="text/plain; charset=utf-8")
+                
+            else:
+                return yemot_read(f"הקשה שגויה, {welcome_text}", "welcome_choice", "no,1,1,7,Digits,no,no,*/")
+
+        # ---------------------------------------------------------
+        # שלב אזור אישי
+        # ---------------------------------------------------------
+        elif step == "PERSONAL_AREA":
+            if user_input == "1":
+                session["step"] = "WELCOME"
+                return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+            elif user_input == "2":
+                session["step"] = "UPDATE_COMMUNITY_CODE"
+                return yemot_read("אנא הקישו את קוד הקהילה החדש שלכם ולאחר מכן הקישו סולמית", "new_community_code", "no,6,1,7,Digits,no,no,*/")
+            else:
+                return show_personal_area(session)
+
+        elif step == "UPDATE_COMMUNITY_CODE":
+            if not user_input:
+                return yemot_read("אנא הקישו את קוד הקהילה החדש שלכם ולאחר מכן הקישו סולמית", "new_community_code", "no,6,1,7,Digits,no,no,*/")
+                
+            new_code = user_input
+            user = session.get("user") or {}
+            user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or session.get("phone")
+            
+            if APPS_SCRIPT_URL:
+                try:
+                    payload = {
+                        "type": "update_community_code",
+                        "id_number": str(user_id),
+                        "phone": str(session.get("phone", "")),
+                        "community_code": str(new_code)
+                    }
+                    background_tasks.add_task(requests.post, APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
+                except Exception:
+                    pass
+
+            user["community_code"] = new_code
+            if user_id in CACHE["users"]:
+                CACHE["users"][user_id]["community_code"] = new_code
+            if session.get("phone") in CACHE["users"]:
+                CACHE["users"][session["phone"]]["community_code"] = new_code
+                
+            return show_personal_area(session, prefix="קוד הקהילה עודכן בהצלחה, ")
+
+        # ---------------------------------------------------------
+        # שלב בחירה: שחזור הזמנה קודמת שלא שולמה
+        # ---------------------------------------------------------
+        elif step == "RESTORE_CART_CHOICE":
+            user = session.get("user") or {}
+            user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
+            
+            if user_input == "1":
+                # להמשך קנייה זו - שחזור סל קודם
+                session["cart"] = SAVED_CARTS.get(user_id, [])
+                session["step"] = "MAIN_MENU"
+                return await show_categories(session, prefix="ממשיכים את ההזמנה הקודמת, ")
+            elif user_input == "2":
+                # להתחלת קנייה חדשה - איפוס סל
+                session["cart"] = []
+                if user_id in SAVED_CARTS:
+                    del SAVED_CARTS[user_id]
+                session["step"] = "MAIN_MENU"
+                return await show_categories(session, prefix="מתחילים הזמנה חדשה, ")
+            else:
+                msg = "הקשה שגויה, המערכת מזהה כי יש לך הזמנה פתוחה במערכת, להמשך קנייה זו הקישו 1, להתחלת קנייה חדשה הקישו 2"
+                return yemot_read(msg, "restore_cart_choice", "no,1,1,7,Digits,no,no,*/")
+
+        # ---------------------------------------------------------
+        # שלב 1: זיהוי מורשים
+        # ---------------------------------------------------------
+        elif step == "AUTH":
+            if not user_input:
+                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
+            
+            if user_input in CACHE["users"]:
+                session["user"] = CACHE["users"][user_input]
+                background_tasks.add_task(log_general_event, call_id, phone, "זיהוי מוצלח", f"זוהה לפי {user_input}")
+                
+                target = session.get("auth_target", "MAIN_MENU")
+                if target == "PERSONAL_AREA":
+                    return show_personal_area(session)
+                else:
+                    return await check_abandoned_cart_or_proceed(session, background_tasks)
+            else:
+                session["step"] = "NOT_AUTHORIZED_CHOICE"
+                background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", f"הוקש {user_input} - לא במורשים")
+                return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+
+        elif step == "NOT_AUTHORIZED_CHOICE":
+            if user_input == "1":
+                session["step"] = "AUTH"
+                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,1,7,Digits,no,no,*/")
+            elif user_input == "2":
+                session["step"] = "REG_NAME"
+                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+            else:
+                return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+
+        # ---------------------------------------------------------
+        # תהליך הרשמה (שם -> ת.ז -> טלפון -> כתובת -> קוד קהילה)
+        # ---------------------------------------------------------
+        elif step == "REG_NAME":
+            if not raw_user_input:
+                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+            
+            transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
+            if not transcribed_text:
+                return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                
+            session["reg_data"]["first_name"] = transcribed_text
+            session["step"] = "REG_ID"
             return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
-        
-        if user_input in CACHE["users"]:
-            return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", "no,9,8,7,Digits,no,no,*/")
-            
-        session["reg_data"]["id_number"] = user_input
-        session["step"] = "REG_PHONE"
-        return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
 
-    elif step == "REG_PHONE":
-        if not user_input:
+        elif step == "REG_ID":
+            if not user_input:
+                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+            
+            if user_input in CACHE["users"]:
+                return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", "no,9,8,7,Digits,no,no,*/")
+                
+            session["reg_data"]["id_number"] = user_input
+            session["step"] = "REG_PHONE"
             return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
-        session["reg_data"]["phone"] = user_input
-        session["step"] = "REG_ADDRESS"
-        return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
 
-    elif step == "REG_ADDRESS":
-        if not raw_user_input:
-            return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
-            
-        transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
-        if not transcribed_text:
-            return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
+        elif step == "REG_PHONE":
+            if not user_input:
+                return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
+            session["reg_data"]["phone"] = user_input
+            session["step"] = "REG_ADDRESS"
+            return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
 
-        session["reg_data"]["address"] = transcribed_text
-        session["step"] = "REG_COMMUNITY_CODE"
-        return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", "no,6,0,7,Digits,no,no,*/")
-
-    elif step == "REG_COMMUNITY_CODE":
-        community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
-        session["reg_data"]["community_code"] = community_code
-        
-        user_info = session["reg_data"]
-        new_user = {
-            "id_number": user_info.get("id_number"),
-            "phone": user_info.get("phone"),
-            "first_name": user_info.get("first_name"),
-            "last_name": "",
-            "address": user_info.get("address"),
-            "community_code": user_info.get("community_code"),
-            "is_active": "TRUE"
-        }
-        CACHE["users"][user_info["id_number"]] = new_user
-        CACHE["users"][user_info["phone"]] = new_user
-        session["user"] = new_user
-        
-        background_tasks.add_task(save_new_user_to_sheet, user_info)
-        background_tasks.add_task(log_general_event, call_id, phone, "הרשמה הושלמה", f"נרשם: {user_info.get('first_name')}")
-        
-        return await show_categories(session, prefix="הרשמתכם הושלמה בהצלחה, מועברים לתפריט ההזמנות, ")
-
-    # ---------------------------------------------------------
-    # שלב 2: תפריט קטגוריות
-    # ---------------------------------------------------------
-    elif step == "MAIN_MENU":
-        cats = CACHE["categories"]
-        if user_input == "9":
-            return initiate_checkout(session)
-            
-        try:
-            choice_idx = int(user_input) - 1
-            if 0 <= choice_idx < len(cats):
-                selected_cat = cats[choice_idx]
-                session["selected_cat"] = selected_cat["category_name"]
-                session["step"] = "KASHRUT_MENU"
-                kashruts = [k.strip() for k in str(selected_cat.get("kashruts", "")).split(",") if k.strip()]
-                session["available_kashruts"] = kashruts
+        elif step == "REG_ADDRESS":
+            if not raw_user_input:
+                return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
                 
-                if not kashruts:
-                    session["selected_kashrut"] = None
-                    return start_product_loop(session)
+            transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
+            if not transcribed_text:
+                return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
+
+            session["reg_data"]["address"] = transcribed_text
+            session["step"] = "REG_COMMUNITY_CODE"
+            return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", "no,6,0,7,Digits,no,no,*/")
+
+        elif step == "REG_COMMUNITY_CODE":
+            community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
+            session["reg_data"]["community_code"] = community_code
+            
+            user_info = session["reg_data"]
+            new_user = {
+                "id_number": user_info.get("id_number"),
+                "phone": user_info.get("phone"),
+                "first_name": user_info.get("first_name"),
+                "last_name": "",
+                "address": user_info.get("address"),
+                "community_code": user_info.get("community_code"),
+                "is_active": "TRUE"
+            }
+            CACHE["users"][user_info["id_number"]] = new_user
+            CACHE["users"][user_info["phone"]] = new_user
+            session["user"] = new_user
+            
+            background_tasks.add_task(save_new_user_to_sheet, user_info)
+            background_tasks.add_task(log_general_event, call_id, phone, "הרשמה הושלמה", f"נרשם: {user_info.get('first_name')}")
+            
+            return await show_categories(session, prefix="הרשמתכם הושלמה בהצלחה, מועברים לתפריט ההזמנות, ")
+
+        # ---------------------------------------------------------
+        # שלב 2: תפריט קטגוריות
+        # ---------------------------------------------------------
+        elif step == "MAIN_MENU":
+            cats = CACHE["categories"]
+            if user_input == "9":
+                return initiate_checkout(session)
                 
-                k_text = ""
-                for i, k in enumerate(kashruts, 1):
-                    k_text += f"לכשרות {k} הקישו {i}, "
-                return yemot_read(k_text, "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-            else:
+            try:
+                choice_idx = int(user_input) - 1
+                if 0 <= choice_idx < len(cats):
+                    selected_cat = cats[choice_idx]
+                    session["selected_cat"] = selected_cat["category_name"]
+                    session["step"] = "KASHRUT_MENU"
+                    kashruts = [k.strip() for k in str(selected_cat.get("kashruts", "")).split(",") if k.strip()]
+                    session["available_kashruts"] = kashruts
+                    
+                    if not kashruts:
+                        session["selected_kashrut"] = None
+                        return start_product_loop(session)
+                    
+                    k_text = ""
+                    for i, k in enumerate(kashruts, 1):
+                        k_text += f"לכשרות {k} הקישו {i}, "
+                    return yemot_read(k_text, "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+                else:
+                    return await show_categories(session, prefix="הקשה שגויה, ")
+            except ValueError:
                 return await show_categories(session, prefix="הקשה שגויה, ")
-        except ValueError:
-            return await show_categories(session, prefix="הקשה שגויה, ")
 
-    # ---------------------------------------------------------
-    # שלב 3: תפריט כשרויות
-    # ---------------------------------------------------------
-    elif step == "KASHRUT_MENU":
-        kashruts = session.get("available_kashruts", [])
-        if user_input == "9":
-            return initiate_checkout(session)
-            
-        try:
-            choice_idx = int(user_input) - 1
-            if 0 <= choice_idx < len(kashruts):
-                session["selected_kashrut"] = kashruts[choice_idx]
-                return start_product_loop(session)
-            else:
-                return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-        except ValueError:
-            return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-
-    # ---------------------------------------------------------
-    # שלב 4: דפדוף במוצרים במכירות
-    # ---------------------------------------------------------
-    elif step == "PRODUCT_LOOP":
-        products = session["filtered_products"]
-        idx = session["product_index"]
-        
-        if user_input == "1":
-            session["step"] = "QTY_INPUT"
-            p = products[idx]
-            return yemot_read(f"הקש את מספר הפריטים שברצונך להזמין ממוצר {p['name']}", "qty_input", "no,3,1,7,Digits,no,no,*/")
-        elif user_input == "2":
-            next_idx = (idx + 1) % len(products)
-            session["product_index"] = next_idx
-            return play_current_product(session)
-        elif user_input == "3":
-            session["step"] = "MAIN_MENU"
-            return await show_categories(session)
-        elif user_input == "9":
-            return initiate_checkout(session)
-        else:
-            return play_current_product(session, prefix="הקשה שגויה, ")
-
-    # ---------------------------------------------------------
-    # שלב 4ב: דפדוף בקטלוג (שמיעה בלבד)
-    # ---------------------------------------------------------
-    elif step == "CATALOG_LOOP":
-        products = session.get("filtered_products", [])
-        idx = session.get("product_index", 0)
-        
-        if user_input == "1":
-            next_idx = (idx + 1) % len(products)
-            session["product_index"] = next_idx
-            return play_catalog_product(session)
-        elif user_input == "2":
-            session["step"] = "WELCOME"
-            return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-        else:
-            return play_catalog_product(session, prefix="הקשה שגויה, ")
-
-    # ---------------------------------------------------------
-    # שלב 5: הזנת כמות (שמירת הסל בזמן אמת עבור המשתמש)
-    # ---------------------------------------------------------
-    elif step == "QTY_INPUT":
-        try:
-            qty = int(user_input)
-            if qty <= 0:
-                return yemot_read("כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה", "qty_input", "no,3,1,7,Digits,no,no,*/")
-            
-            p = session["filtered_products"][session["product_index"]]
-            total_price = qty * float(p["price"])
-            
-            session["cart"].append({
-                "sku": p["sku"],
-                "name": p["name"],
-                "qty": qty,
-                "total": total_price
-            })
-            
-            # עדכון סל פתוח בזיכרון בזמן אמת
-            user = session.get("user") or {}
-            user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
-            if user_id:
-                SAVED_CARTS[user_id] = session["cart"]
-
-            background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"נוסף {p['name']} כמות {qty}")
-            
-            session["step"] = "AFTER_ADD_MENU"
-            msg = "המוצר נוסף בהצלחה לסל הקניות שלך, למוצר הבא הקישו 1, למעבר לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9"
-            return yemot_read(msg, "after_add_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-        except ValueError:
-            return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד", "qty_input", "no,3,1,7,Digits,no,no,*/")
-
-    elif step == "AFTER_ADD_MENU":
-        if user_input == "1":
-            session["product_index"] = (session["product_index"] + 1) % len(session["filtered_products"])
-            session["step"] = "PRODUCT_LOOP"
-            return play_current_product(session)
-        elif user_input == "2":
-            session["step"] = "MAIN_MENU"
-            return await show_categories(session)
-        elif user_input == "9":
-            return initiate_checkout(session)
-        else:
-            return yemot_read("הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9", "after_add_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
-
-    # ---------------------------------------------------------
-    # שלב 6: אישור דמי החזקת תחנת חלוקה (10 ש"ח)
-    # ---------------------------------------------------------
-    elif step == "CONFIRM_CHECKOUT_FEE":
-        if user_input == "1":
-            return finish_checkout(session, background_tasks)
-        elif user_input == "2":
-            session["cart"] = []
-            user = session.get("user") or {}
-            user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
-            if user_id and user_id in SAVED_CARTS:
-                del SAVED_CARTS[user_id]
+        # ---------------------------------------------------------
+        # שלב 3: תפריט כשרויות
+        # ---------------------------------------------------------
+        elif step == "KASHRUT_MENU":
+            kashruts = session.get("available_kashruts", [])
+            if user_input == "9":
+                return initiate_checkout(session)
                 
-            session["step"] = "MAIN_MENU"
-            return await show_categories(session, prefix="ההזמנה בוטלה, מעביר אותך חזרה לתפריט, ")
-        else:
-            total_with_fee = session.get("total_sum_with_fee", 10)
-            part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
-            part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
+            try:
+                choice_idx = int(user_input) - 1
+                if 0 <= choice_idx < len(kashruts):
+                    session["selected_kashrut"] = kashruts[choice_idx]
+                    return start_product_loop(session)
+                else:
+                    return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+            except ValueError:
+                return yemot_read("הקשה שגויה, אנא בחר כשרות מתוך הרשימה", "kashrut_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+
+        # ---------------------------------------------------------
+        # שלב 4: דפדוף במוצרים במכירות
+        # ---------------------------------------------------------
+        elif step == "PRODUCT_LOOP":
+            products = session["filtered_products"]
+            idx = session["product_index"]
             
-            if USE_AUDIO_FILES:
-                sound_chain = f"f-/הודעות מערכת/023a.n-{total_with_fee}.f-/הודעות מערכת/023b"
+            if user_input == "1":
+                session["step"] = "QTY_INPUT"
+                p = products[idx]
+                return yemot_read(f"הקש את מספר הפריטים שברצונך להזמין ממוצר {p['name']}", "qty_input", "no,3,1,7,Digits,no,no,*/")
+            elif user_input == "2":
+                next_idx = (idx + 1) % len(products)
+                session["product_index"] = next_idx
+                return play_current_product(session)
+            elif user_input == "3":
+                session["step"] = "MAIN_MENU"
+                return await show_categories(session)
+            elif user_input == "9":
+                return initiate_checkout(session)
             else:
-                sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
+                return play_current_product(session, prefix="הקשה שגויה, ")
 
-            content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
-            return Response(content=content, media_type="text/plain; charset=utf-8")
+        # ---------------------------------------------------------
+        # שלב 4ב: דפדוף בקטלוג (שמיעה בלבד)
+        # ---------------------------------------------------------
+        elif step == "CATALOG_LOOP":
+            products = session.get("filtered_products", [])
+            idx = session.get("product_index", 0)
+            
+            if user_input == "1":
+                next_idx = (idx + 1) % len(products)
+                session["product_index"] = next_idx
+                return play_catalog_product(session)
+            elif user_input == "2":
+                session["step"] = "WELCOME"
+                return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+            else:
+                return play_catalog_product(session, prefix="הקשה שגויה, ")
 
-    return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
+        # ---------------------------------------------------------
+        # שלב 5: הזנת כמות (שמירת הסל בזמן אמת עבור המשתמש)
+        # ---------------------------------------------------------
+        elif step == "QTY_INPUT":
+            try:
+                qty = int(user_input)
+                if qty <= 0:
+                    return yemot_read("כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה", "qty_input", "no,3,1,7,Digits,no,no,*/")
+                
+                p = session["filtered_products"][session["product_index"]]
+                total_price = qty * float(p["price"])
+                
+                session["cart"].append({
+                    "sku": p["sku"],
+                    "name": p["name"],
+                    "qty": qty,
+                    "total": total_price
+                })
+                
+                # עדכון סל פתוח בזיכרון בזמן אמת
+                user = session.get("user") or {}
+                user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
+                if user_id:
+                    SAVED_CARTS[user_id] = session["cart"]
+
+                background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"נוסף {p['name']} כמות {qty}")
+                
+                session["step"] = "AFTER_ADD_MENU"
+                msg = "המוצר נוסף בהצלחה לסל הקניות שלך, למוצר הבא הקישו 1, למעבר לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9"
+                return yemot_read(msg, "after_add_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+            except ValueError:
+                return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד", "qty_input", "no,3,1,7,Digits,no,no,*/")
+
+        elif step == "AFTER_ADD_MENU":
+            if user_input == "1":
+                session["product_index"] = (session["product_index"] + 1) % len(session["filtered_products"])
+                session["step"] = "PRODUCT_LOOP"
+                return play_current_product(session)
+            elif user_input == "2":
+                session["step"] = "MAIN_MENU"
+                return await show_categories(session)
+            elif user_input == "9":
+                return initiate_checkout(session)
+            else:
+                return yemot_read("הקשה שגויה, למוצר הבא הקישו 1, לקטגוריה אחרת הקישו 2, לסיום הקנייה ומעבר לתשלום הקישו 9", "after_add_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+
+        # ---------------------------------------------------------
+        # שלב 6: אישור דמי החזקת תחנת חלוקה (10 ש"ח)
+        # ---------------------------------------------------------
+        elif step == "CONFIRM_CHECKOUT_FEE":
+            if user_input == "1":
+                return finish_checkout(session, background_tasks)
+            elif user_input == "2":
+                session["cart"] = []
+                user = session.get("user") or {}
+                user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
+                if user_id and user_id in SAVED_CARTS:
+                    del SAVED_CARTS[user_id]
+                    
+                session["step"] = "MAIN_MENU"
+                return await show_categories(session, prefix="ההזמנה בוטלה, מעביר אותך חזרה לתפריט, ")
+            else:
+                total_with_fee = session.get("total_sum_with_fee", 10)
+                part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
+                part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
+                
+                if USE_AUDIO_FILES:
+                    sound_chain = f"f-/הודעות מערכת/023a.n-{total_with_fee}.f-/הודעות מערכת/023b"
+                else:
+                    sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
+
+                content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
+                return Response(content=content, media_type="text/plain; charset=utf-8")
+
+        return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
+
+    except Exception as e:
+        print(f"CRITICAL IVR HANDLER ERROR: {e}\n{traceback.format_exc()}", flush=True)
+        return yemot_read("אירעה שגיאה זמנית בעבודת השרת, אנא נסו שנית", "welcome_choice", "no,1,1,7,Digits,no,no,*/")
 
 def show_personal_area(session: dict, prefix: str = "") -> Response:
     user = session.get("user")
@@ -957,7 +961,7 @@ def initiate_checkout(session: dict) -> Response:
     part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
     
     if USE_AUDIO_FILES:
-        sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
+        sound_chain = f"f-/הודעות מערכת/023a.n-{total_with_fee}.f-/הודעות מערכת/023b"
     else:
         sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
 
@@ -995,7 +999,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     part2_text = "שקלים מועברים כעת לסליקת אשראי"
     
     if USE_AUDIO_FILES:
-        msg_chain = f"f-/{AUDIO_FOLDER}/025a.n-{total_sum}.f-/{AUDIO_FOLDER}/025b"
+        msg_chain = f"f-/הודעות מערכת/025a.n-{total_sum}.f-/הודעות מערכת/025b"
     else:
         msg_chain = f"t-{clean_tts(part1_text)}.n-{total_sum}.t-{clean_tts(part2_text)}"
     
