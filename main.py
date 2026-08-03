@@ -25,9 +25,8 @@ ALLOWED_PHONES_WHEN_CLOSED = [
 ]
 
 # 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
-# שים את קובצי השמע בתיקייה בשם messages בשלוחה הראשית!
 USE_AUDIO_FILES = True
-AUDIO_FOLDER = "messages"  # שם התיקייה באנגלית ללא רווחים!
+AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
@@ -115,34 +114,25 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מהיר ומאובטח)
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     if not my_rec_path or not isinstance(my_rec_path, str):
-        print("LOG TRANSCRIBE: empty or invalid path", flush=True)
         return ""
 
-    # וידוא טוקן מלא ללא קיטועים
-    active_token = token if (token and ":" in str(token)) else YEMOT_TOKEN
-    clean_path = str(my_rec_path).strip()
-
-    if clean_path.startswith("ivr2:"):
-        clean_path = clean_path[5:]
+    active_token = token or YEMOT_TOKEN
+    clean_path = my_rec_path.strip()
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
-    encoded_p = urllib.parse.quote(f"ivr2:{clean_path}", safe=":/")
-    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_p}"
+    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
 
-    temp_audio = f"downloaded_{os.getpid()}_{datetime.now().strftime('%H%M%S')}.file"
-    converted_wav = f"converted_{os.getpid()}_{datetime.now().strftime('%H%M%S')}.wav"
+    temp_audio = f"downloaded_{os.getpid()}.file"
+    converted_wav = f"converted_{os.getpid()}.wav"
 
     try:
-        print(f"LOG TRANSCRIBE: Downloading {audio_url}", flush=True)
-        res = requests.get(audio_url, timeout=5)
-        
+        res = requests.get(audio_url, timeout=30)
         if res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
-            print(f"LOG TRANSCRIBE ERROR: Download failed. Content: {res.text[:100] if res else 'None'}", flush=True)
             return ""
 
         with open(temp_audio, "wb") as f:
@@ -158,7 +148,6 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             audio_data = recognizer.record(source)
             text = recognizer.recognize_google(audio_data, language='he-IL')
 
-        print(f"LOG TRANSCRIBE SUCCESS: '{text}'", flush=True)
         return text.strip() if text else ""
 
     except Exception as e:
@@ -365,7 +354,7 @@ def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*
     content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-# תבנית תקנית לחלוטין לקבלת הקלטה לפי עמוד 31 בתיעוד: read=sound=var_name,,record,/הקלטות
+# שמירת ההקלטה מפורשות בתיקיית "/הקלטות" לפי עמוד 11 בתיעוד ימות המשיח
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
@@ -374,7 +363,7 @@ def yemot_read_record(text: str, var_name: str, options: str = "no,record", reco
     else:
         sound_str = f"t-{clean_text}"
         
-    content = f"read={sound_str}={var_name},,record,{record_folder}"
+    content = f"read={sound_str}={var_name},{options},{record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
