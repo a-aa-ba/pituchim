@@ -359,7 +359,7 @@ def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*
     content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
+def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/") -> Response:
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
         file_num = get_prompt_file_num(clean_text, var_name)
