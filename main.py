@@ -20,8 +20,8 @@ IS_SYSTEM_OPEN = False
 
 # רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
 ALLOWED_PHONES_WHEN_CLOSED = [
-    "0533160009",
-    "0527143207"
+    "0501234567",
+    "0529999999"
 ]
 
 # 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
@@ -116,35 +116,53 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית באמצעות SpeechRecognition
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית עם לוגים מפורטים לשרת
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
+    print(f"\n=======================================================", flush=True)
+    print(f"LOG [תמלול שמע]: התקבל נתיב להקלטה מימות המשיח: '{my_rec_path}'", flush=True)
+    print(f"=======================================================", flush=True)
+
     if not my_rec_path or not isinstance(my_rec_path, str):
+        print("LOG ERROR: נתיב הקלטה ריק או לא תקין", flush=True)
         return ""
 
     active_token = token or YEMOT_TOKEN
-    clean_path = my_rec_path.strip()
-    if clean_path.startswith("Digits-"):
-        clean_path = clean_path.replace("Digits-", "")
+    clean_path = str(my_rec_path).strip()
+
+    # ניקוי קידומות נפוצות שימות המשיח מעבירים בפרמטרים
+    clean_path = clean_path.replace("Digits-", "").replace("val_name-", "")
+    if clean_path.startswith("ivr2:"):
+        clean_path = clean_path[5:]
+    elif clean_path.startswith("ivr2/"):
+        clean_path = clean_path[5:]
+        
+    clean_path = clean_path.strip()
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
     audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
+    print(f"LOG [תמלול שמע]: מוריד קובץ שמע מ-URL: {audio_url}", flush=True)
 
     temp_audio = f"downloaded_{os.getpid()}.file"
     converted_wav = f"converted_{os.getpid()}.wav"
 
     try:
         res = requests.get(audio_url, timeout=30)
-        if res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
+        print(f"LOG [תמלול שמע]: הורדת הקובץ הסתיימה. Status: {res.status_code}, גודל: {len(res.content)} bytes", flush=True)
+
+        if res.status_code != 200 or len(res.content) < 100 or res.content.startswith(b'<') or res.content.startswith(b'{'):
+            print(f"LOG ERROR [תמלול שמע]: הורדת קובץ שמע נכשלה. התקבל תוכן לא תקין: {res.content[:150]}", flush=True)
             return ""
 
         with open(temp_audio, "wb") as f:
             f.write(res.content)
 
         if not convert_audio_to_pcm_wav(temp_audio, converted_wav):
+            print("LOG WARNING [תמלול שמע]: המרת FFmpeg נכשלה, מנסה לתמלל ישירות מגרסת המקור", flush=True)
             target_wav = temp_audio
         else:
+            print("LOG [תמלול שמע]: המרת FFmpeg ל-WAV PCM הושלמה בהצלחה", flush=True)
             target_wav = converted_wav
 
         recognizer = sr.Recognizer()
@@ -153,16 +171,19 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             
             try:
                 text = recognizer.recognize_google(audio_data, language='he-IL')
+                print(f"\n=======================================================", flush=True)
+                print(f"=====> תוצאת התמלול שהתקבלה מ-Google: '{text}' <=====", flush=True)
+                print(f"=======================================================\n", flush=True)
                 return text.strip() if text else ""
             except sr.UnknownValueError:
-                print("LOG: SpeechRecognition - לא הצליח להבין את ההקלטה", flush=True)
+                print("\n=====> תוצאת התמלול: [לא הצליח לזהות מילים / הקלטה שקטה/לא ברורה] <=====\n", flush=True)
                 return ""
             except sr.RequestError as e:
-                print(f"LOG ERROR: SpeechRecognition - שגיאת שרת תמלול: {e}", flush=True)
+                print(f"LOG ERROR [תמלול שמע]: SpeechRecognition שגיאת תקשורת: {e}", flush=True)
                 return ""
 
     except Exception as e:
-        print(f"LOG ERROR בתהליך תמלול השמע: {e}", flush=True)
+        print(f"LOG ERROR בתהליך תמלול השמע: {e}\n{traceback.format_exc()}", flush=True)
         return ""
     finally:
         if os.path.exists(temp_audio):
@@ -361,15 +382,16 @@ def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*
     content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/") -> Response:
+def yemot_read_tts(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
+    """פונקציה ייעודית למענה בטקסט-לדיבור (TTS) של השרת בלבד"""
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
-        file_num = get_prompt_file_num(clean_text, var_name)
-        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}"
-    else:
-        sound_str = f"t-{clean_text}"
-        
-    content = f"read={sound_str}={var_name},{options},{record_folder}"
+    content = f"read=t-{clean_text}={var_name},{options}"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+def yemot_read_record_tts(text: str, var_name: str, options: str = "no,record", record_folder: str = "/") -> Response:
+    """פונקציה ייעודית להקלטת שמע עם הנחיה קולית ב-TTS בלבד"""
+    clean_text = clean_tts(text)
+    content = f"read=t-{clean_text}={var_name},{options},{record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
@@ -488,7 +510,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     
             elif user_input == "3":
                 session["step"] = "REG_NAME"
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                return yemot_read_record_tts("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
                 
             elif user_input == "4":
                 user = session.get("user") or CACHE["users"].get(phone)
@@ -608,90 +630,92 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,1,7,Digits,no,no,*/")
             elif user_input == "2":
                 session["step"] = "REG_NAME"
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                return yemot_read_record_tts("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
             else:
                 return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
         # ---------------------------------------------------------
-        # תהליך הרשמה (שם -> אישור שם -> ת.ז -> טלפון -> כתובת -> אישור כתובת -> קוד קהילה)
+        # תהליך הרשמה (תמלול והנחיות ב-TTS בלבד!)
         # ---------------------------------------------------------
         elif step == "REG_NAME":
+            print(f"LOG [REG_NAME]: התקבל קלט להקלטת שם: '{raw_user_input}'", flush=True)
             if not raw_user_input:
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                return yemot_read_record_tts("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
             
             transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
+            print(f"LOG [REG_NAME]: תמלול שם שנכנס לשרת: '{transcribed_text}'", flush=True)
+
             if not transcribed_text:
-                return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                return yemot_read_record_tts("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
                 
             session["reg_data"]["temp_name"] = transcribed_text
             session["step"] = "REG_NAME_CONFIRM"
             
             clean_name = clean_tts(transcribed_text)
-            sound_chain = f"t-השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-            content = f"read={sound_chain}=reg_name_confirm_choice,no,1,1,7,Digits,no,no,*/"
-            return Response(content=content, media_type="text/plain; charset=utf-8")
+            sound_chain = f"השם שנקלט הוא {clean_name}, לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            return yemot_read_tts(sound_chain, "reg_name_confirm_choice", "no,1,1,7,Digits,no,no,*/")
 
         elif step == "REG_NAME_CONFIRM":
             if user_input == "1":
                 session["reg_data"]["first_name"] = session["reg_data"].get("temp_name", "")
                 session["step"] = "REG_ID"
-                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+                return yemot_read_tts("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
             elif user_input == "2":
                 session["step"] = "REG_NAME"
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                return yemot_read_record_tts("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
             else:
                 clean_name = clean_tts(session["reg_data"].get("temp_name", ""))
-                sound_chain = f"t-הקשה שגויה. השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                content = f"read={sound_chain}=reg_name_confirm_choice,no,1,1,7,Digits,no,no,*/"
-                return Response(content=content, media_type="text/plain; charset=utf-8")
+                sound_chain = f"הקשה שגויה, השם שנקלט הוא {clean_name}, לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                return yemot_read_tts(sound_chain, "reg_name_confirm_choice", "no,1,1,7,Digits,no,no,*/")
 
         elif step == "REG_ID":
             if not user_input:
-                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+                return yemot_read_tts("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
             
             if user_input in CACHE["users"]:
-                return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", "no,9,8,7,Digits,no,no,*/")
+                return yemot_read_tts("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", "no,9,8,7,Digits,no,no,*/")
                 
             session["reg_data"]["id_number"] = user_input
             session["step"] = "REG_PHONE"
-            return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
+            return yemot_read_tts("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
 
         elif step == "REG_PHONE":
             if not user_input:
-                return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
+                return yemot_read_tts("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
             session["reg_data"]["phone"] = user_input
             session["step"] = "REG_ADDRESS"
-            return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
+            return yemot_read_record_tts("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
 
         elif step == "REG_ADDRESS":
+            print(f"LOG [REG_ADDRESS]: התקבל קלט להקלטת כתובת: '{raw_user_input}'", flush=True)
             if not raw_user_input:
-                return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
+                return yemot_read_record_tts("אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
                 
             transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
+            print(f"LOG [REG_ADDRESS]: תמלול כתובת שנכנס לשרת: '{transcribed_text}'", flush=True)
+
             if not transcribed_text:
-                return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
+                return yemot_read_record_tts("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
 
             session["reg_data"]["temp_address"] = transcribed_text
             session["step"] = "REG_ADDRESS_CONFIRM"
             
             clean_addr = clean_tts(transcribed_text)
-            sound_chain = f"t-הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-            content = f"read={sound_chain}=reg_address_confirm_choice,no,1,1,7,Digits,no,no,*/"
-            return Response(content=content, media_type="text/plain; charset=utf-8")
+            sound_chain = f"הכתובת שנקלטה היא {clean_addr}, לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            return yemot_read_tts(sound_chain, "reg_address_confirm_choice", "no,1,1,7,Digits,no,no,*/")
 
         elif step == "REG_ADDRESS_CONFIRM":
             if user_input == "1":
                 session["reg_data"]["address"] = session["reg_data"].get("temp_address", "")
                 session["step"] = "REG_COMMUNITY_CODE"
-                return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", "no,6,0,7,Digits,no,no,*/")
+                return yemot_read_tts("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", "no,6,0,7,Digits,no,no,*/")
             elif user_input == "2":
                 session["step"] = "REG_ADDRESS"
-                return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
+                return yemot_read_record_tts("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
             else:
                 clean_addr = clean_tts(session["reg_data"].get("temp_address", ""))
-                sound_chain = f"t-הקשה שגויה. הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                content = f"read={sound_chain}=reg_address_confirm_choice,no,1,1,7,Digits,no,no,*/"
-                return Response(content=content, media_type="text/plain; charset=utf-8")
+                sound_chain = f"הקשה שגויה, הכתובת שנקלטה היא {clean_addr}, לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                return yemot_read_tts(sound_chain, "reg_address_confirm_choice", "no,1,1,7,Digits,no,no,*/")
 
         elif step == "REG_COMMUNITY_CODE":
             community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
