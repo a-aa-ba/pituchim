@@ -16,10 +16,15 @@ app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
 # 1. הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
-IS_SYSTEM_OPEN = True
+IS_SYSTEM_OPEN = False
+
+# רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
+ALLOWED_PHONES_WHEN_CLOSED = [
+    "123456789",
+    "0529999999"
+]
 
 # 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
-# כשזה מוגדר True - תושמע אך ורק ההקלטה שלך ללא הקראת טקסט אחריה!
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
@@ -109,7 +114,7 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מתוקן)
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מתוקן ומאובטח)
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     if not my_rec_path or not isinstance(my_rec_path, str):
@@ -119,29 +124,34 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
     active_token = token or YEMOT_TOKEN
     clean_path = my_rec_path.strip()
 
-    # ניקוי קידומת ivr2: אם קיימת
+    # ניקוי קידומות ivr2:
     if clean_path.startswith("ivr2:"):
         clean_path = clean_path[5:]
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
-    # קידוד נכון של הנתיב (טיפול בעברית וסלשים)
-    encoded_path = urllib.parse.quote(f"ivr2:{clean_path}", safe=":/")
-    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_path}"
+    urls_to_try = [
+        f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}",
+        f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={urllib.parse.quote('ivr2:' + clean_path, safe=':/')}"
+    ]
 
     temp_audio = f"downloaded_{os.getpid()}.file"
     converted_wav = f"converted_{os.getpid()}.wav"
 
+    res = None
+    for audio_url in urls_to_try:
+        try:
+            print(f"LOG TRANSCRIBE: Downloading audio from {audio_url}", flush=True)
+            res = requests.get(audio_url, timeout=30)
+            if res.status_code == 200 and not res.content.startswith(b'<') and not res.content.startswith(b'{'):
+                break
+        except Exception as err:
+            print(f"LOG TRANSCRIBE URL TRY ERROR: {err}", flush=True)
+
     try:
-        print(f"LOG TRANSCRIBE: Downloading audio from {audio_url}", flush=True)
-        res = requests.get(audio_url, timeout=30)
-        
-        if res.status_code != 200:
-            print(f"LOG TRANSCRIBE ERROR: status_code={res.status_code}", flush=True)
-            return ""
-            
-        if res.content.startswith(b'<') or res.content.startswith(b'{'):
-            print(f"LOG TRANSCRIBE ERROR: Yemot returned error content: {res.text[:200]}", flush=True)
+        if not res or res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
+            error_body = res.text[:200] if res else "No response"
+            print(f"LOG TRANSCRIBE ERROR: Download failed. Content: {error_body}", flush=True)
             return ""
 
         with open(temp_audio, "wb") as f:
@@ -364,6 +374,7 @@ def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*
     content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
+# שומר את ההקלטה מפורשות בתיקיית "/הקלטות" לפי עמוד 11 בתיעוד ימות המשיח
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
@@ -372,7 +383,7 @@ def yemot_read_record(text: str, var_name: str, options: str = "no,record", reco
     else:
         sound_str = f"t-{clean_text}"
         
-    content = f"read={sound_str}={var_name},{options}&record_folder={record_folder}"
+    content = f"read={sound_str}={var_name},{options},{record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
@@ -459,8 +470,12 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not user_input:
             return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
         
-        # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5
-        if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
+        # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5 (חוסם את כולם פרט למספרים מורשים ב-ALLOWED_PHONES_WHEN_CLOSED)
+        user_obj = session.get("user") or CACHE["users"].get(phone) or {}
+        user_id = get_field(user_obj, "תעודת זהות", "id_number") or get_field(user_obj, "מספר טלפון", "phone") or phone
+        is_vip = (phone in ALLOWED_PHONES_WHEN_CLOSED) or (user_id in ALLOWED_PHONES_WHEN_CLOSED)
+
+        if not IS_SYSTEM_OPEN and not is_vip and user_input in ["2", "3", "4", "5"]:
             clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
             clean_welcome = clean_tts(welcome_text)
             if USE_AUDIO_FILES:
