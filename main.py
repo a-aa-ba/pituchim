@@ -114,7 +114,7 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית באמצעות SpeechRecognition
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     if not my_rec_path or not isinstance(my_rec_path, str):
@@ -143,15 +143,24 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         else:
             target_wav = converted_wav
 
+        # שימוש בספריית SpeechRecognition
         recognizer = sr.Recognizer()
         with sr.AudioFile(target_wav) as source:
             audio_data = recognizer.record(source)
-            text = recognizer.recognize_google(audio_data, language='he-IL')
-
-        return text.strip() if text else ""
+            
+            try:
+                # זיהוי דיבור בעברית
+                text = recognizer.recognize_google(audio_data, language='he-IL')
+                return text.strip() if text else ""
+            except sr.UnknownValueError:
+                print("LOG: SpeechRecognition - לא הצליח להבין את ההקלטה", flush=True)
+                return ""
+            except sr.RequestError as e:
+                print(f"LOG ERROR: SpeechRecognition - שגיאת שרת תמלול: {e}", flush=True)
+                return ""
 
     except Exception as e:
-        print(f"LOG ERROR בתמלול: {e}", flush=True)
+        print(f"LOG ERROR בתהליך תמלול השמע: {e}", flush=True)
         return ""
     finally:
         if os.path.exists(temp_audio):
