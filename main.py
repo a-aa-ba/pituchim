@@ -17,7 +17,7 @@ app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
 # 1. הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
-IS_SYSTEM_OPEN = True
+IS_SYSTEM_OPEN = False
 
 # רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
 ALLOWED_PHONES_WHEN_CLOSED = [
