@@ -4,6 +4,7 @@ import json
 import requests
 import subprocess
 import traceback
+import urllib.parse
 from datetime import datetime
 from typing import Dict, Any
 from fastapi import FastAPI, Request, BackgroundTasks
@@ -14,8 +15,13 @@ import speech_recognition as sr
 app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
-# הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
+# 1. הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
 IS_SYSTEM_OPEN = True
+
+# 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
+# כשזה מוגדר True - תושמע אך ורק ההקלטה שלך ללא הקראת טקסט אחריה!
+USE_AUDIO_FILES = True
+AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
@@ -103,25 +109,39 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מתוקן)
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     if not my_rec_path or not isinstance(my_rec_path, str):
+        print("LOG TRANSCRIBE: empty or invalid path", flush=True)
         return ""
 
     active_token = token or YEMOT_TOKEN
     clean_path = my_rec_path.strip()
+
+    # ניקוי קידומת ivr2: אם קיימת
+    if clean_path.startswith("ivr2:"):
+        clean_path = clean_path[5:]
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
-    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
+    # קידוד נכון של הנתיב (טיפול בעברית וסלשים)
+    encoded_path = urllib.parse.quote(f"ivr2:{clean_path}", safe=":/")
+    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_path}"
 
     temp_audio = f"downloaded_{os.getpid()}.file"
     converted_wav = f"converted_{os.getpid()}.wav"
 
     try:
+        print(f"LOG TRANSCRIBE: Downloading audio from {audio_url}", flush=True)
         res = requests.get(audio_url, timeout=30)
-        if res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
+        
+        if res.status_code != 200:
+            print(f"LOG TRANSCRIBE ERROR: status_code={res.status_code}", flush=True)
+            return ""
+            
+        if res.content.startswith(b'<') or res.content.startswith(b'{'):
+            print(f"LOG TRANSCRIBE ERROR: Yemot returned error content: {res.text[:200]}", flush=True)
             return ""
 
         with open(temp_audio, "wb") as f:
@@ -137,10 +157,11 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             audio_data = recognizer.record(source)
             text = recognizer.recognize_google(audio_data, language='he-IL')
 
+        print(f"LOG TRANSCRIBE SUCCESS: Transcribed text = '{text}'", flush=True)
         return text.strip() if text else ""
 
     except Exception as e:
-        print(f"LOG ERROR בתמלול: {e}", flush=True)
+        print(f"LOG ERROR בתמלול: {e}\n{traceback.format_exc()}", flush=True)
         return ""
     finally:
         if os.path.exists(temp_audio):
@@ -300,7 +321,6 @@ def log_transaction_to_sheet(session_data: dict):
     except Exception as e:
         pass
 
-# זיהוי מספר הקובץ לפי הטקסט או המשתנה
 def get_prompt_file_num(text: str, var_name: str) -> str:
     if "סגורה כעת" in text:
         return "002"
@@ -331,25 +351,39 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
     return PROMPT_FILE_MAP.get(var_name, "001")
 
 # -------------------------------------------------------------------
-# פונקציות מענה לימות המשיח - נתיב מלא פניה מהשלוחה הראשית (/הודעות מערכת/)
+# פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
-    file_num = get_prompt_file_num(clean_text, var_name)
-    # נתיב מלא החל מתחילת המערכת (/) לתיקיית הודעות מערכת
-    content = f"read=f-/הודעות מערכת/{file_num}.t-{clean_text}={var_name},{options}"
+    if USE_AUDIO_FILES:
+        file_num = get_prompt_file_num(clean_text, var_name)
+        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}"
+    else:
+        sound_str = f"t-{clean_text}"
+        
+    content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
-    file_num = get_prompt_file_num(clean_text, var_name)
-    content = f"read=f-/הודעות מערכת/{file_num}.t-{clean_text}={var_name},{options}&record_folder={record_folder}"
+    if USE_AUDIO_FILES:
+        file_num = get_prompt_file_num(clean_text, var_name)
+        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}"
+    else:
+        sound_str = f"t-{clean_text}"
+        
+    content = f"read={sound_str}={var_name},{options}&record_folder={record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
     clean_text = clean_tts(text)
-    file_num = get_prompt_file_num(clean_text, "")
-    content = f"id_list_message=f-/הודעות מערכת/{file_num}.t-{clean_text}"
+    if USE_AUDIO_FILES:
+        file_num = get_prompt_file_num(clean_text, "")
+        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}"
+    else:
+        sound_str = f"t-{clean_text}"
+        
+    content = f"id_list_message={sound_str}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 # בדיקה האם קיימת ללקוח הזמנה פתוחה שלא שולמה
@@ -429,7 +463,10 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         if not IS_SYSTEM_OPEN and user_input in ["2", "3", "4", "5"]:
             clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
             clean_welcome = clean_tts(welcome_text)
-            content = f"id_list_message=f-/הודעות מערכת/002.t-{clean_closed}&read=f-/הודעות מערכת/001.t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
+            if USE_AUDIO_FILES:
+                content = f"id_list_message=f-/{AUDIO_FOLDER}/002&read=f-/{AUDIO_FOLDER}/001=welcome_choice,no,1,1,7,Digits,no,no,*/"
+            else:
+                content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
         # מעבר מידי לשלוחה 1 ללא הודעה מקדימה
@@ -795,7 +832,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
             part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
             
-            sound_chain = f"f-/הודעות מערכת/023a.t-{clean_tts(part1_text)}.n-{total_with_fee}.f-/הודעות מערכת/023b.t-{clean_tts(part2_text)}"
+            if USE_AUDIO_FILES:
+                sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
+            else:
+                sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
+
             content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -893,7 +934,11 @@ def initiate_checkout(session: dict) -> Response:
     part1_text = "שימו לב בכל הזמנה יתווספו לתשלום דמי החזקת תחנת החלוקה בסך של 10 שקלים סך הכל לתשלום כולל דמי החזקה הוא"
     part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
     
-    sound_chain = f"f-/הודעות מערכת/023a.t-{clean_tts(part1_text)}.n-{total_with_fee}.f-/הודעות מערכת/023b.t-{clean_tts(part2_text)}"
+    if USE_AUDIO_FILES:
+        sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
+    else:
+        sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
+
     content = f"read={sound_chain}=checkout_confirm_choice,no,1,1,7,no,no,no,*/,,,,,,no"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -927,8 +972,10 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     part1_text = "סך הכל לתשלום"
     part2_text = "שקלים מועברים כעת לסליקת אשראי"
     
-    # שרשור תקין של ימות המשיח עם נקודה: קובץ 025a + הקראת מספר + קובץ 025b
-    msg_chain = f"f-/הודעות מערכת/025a.t-{clean_tts(part1_text)}.n-{total_sum}.f-/הודעות מערכת/025b.t-{clean_tts(part2_text)}"
+    if USE_AUDIO_FILES:
+        msg_chain = f"f-/{AUDIO_FOLDER}/025a.n-{total_sum}.f-/{AUDIO_FOLDER}/025b"
+    else:
+        msg_chain = f"t-{clean_tts(part1_text)}.n-{total_sum}.t-{clean_tts(part2_text)}"
     
     # שליחת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY מפורשות לסליקת תשלום אחד בלבד
     credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY},,,,{CREDIT_CARD_REGISTER_NO}"
