@@ -16,15 +16,16 @@ app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
 # 1. הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
-IS_SYSTEM_OPEN = False
+IS_SYSTEM_OPEN = True
 
 # רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
 ALLOWED_PHONES_WHEN_CLOSED = [
-    "0533160009",
-    "0527143207"
+    "0501234567",
+    "0529999999"
 ]
 
 # 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
+# כשזה מוגדר True - תושמע אך ורק ההקלטה שלך ללא הקראת טקסט אחריה!
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
@@ -114,32 +115,38 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מתוקן ומאובטח)
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מתוקן)
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     if not my_rec_path or not isinstance(my_rec_path, str):
         print("LOG TRANSCRIBE: empty or invalid path", flush=True)
         return ""
 
-    active_token = token or YEMOT_TOKEN
+    # וידוא טוקן מלא ללא קיטועים
+    active_token = token if (token and ":" in str(token)) else YEMOT_TOKEN
     clean_path = my_rec_path.strip()
 
-    # ניקוי קידומות ivr2:
     if clean_path.startswith("ivr2:"):
         clean_path = clean_path[5:]
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
-    urls_to_try = [
-        f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}",
-        f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={urllib.parse.quote('ivr2:' + clean_path, safe=':/')}"
-    ]
+    # ניסיון הורדה מכמה נתיבים אפשריים (הן ישיר והן בתוך תיקיית הקלטות)
+    candidate_paths = []
+    if clean_path.startswith("/הקלטות/"):
+        candidate_paths.append(clean_path)
+        candidate_paths.append(clean_path.replace("/הקלטות/", "/"))
+    else:
+        candidate_paths.append(clean_path)
+        candidate_paths.append(f"/הקלטות{clean_path}")
 
     temp_audio = f"downloaded_{os.getpid()}.file"
     converted_wav = f"converted_{os.getpid()}.wav"
 
     res = None
-    for audio_url in urls_to_try:
+    for path_candidate in candidate_paths:
+        encoded_p = urllib.parse.quote(f"ivr2:{path_candidate}", safe=":/")
+        audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_p}"
         try:
             print(f"LOG TRANSCRIBE: Downloading audio from {audio_url}", flush=True)
             res = requests.get(audio_url, timeout=30)
@@ -374,7 +381,7 @@ def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*
     content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-# שומר את ההקלטה מפורשות בתיקיית "/הקלטות" לפי עמוד 11 בתיעוד ימות המשיח
+# שמירת ההקלטה מפורשות בתיקיית "/הקלטות" לפי עמוד 11 בתיעוד ימות המשיח
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
@@ -848,7 +855,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
             
             if USE_AUDIO_FILES:
-                sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
+                sound_chain = f"f-/הודעות מערכת/023a.n-{total_with_fee}.f-/הודעות מערכת/023b"
             else:
                 sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
 
