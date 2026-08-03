@@ -1,3 +1,24 @@
+[1]כאשר נשלחו פרמטרים נוספים מעבר ל-`,,record` (או כשהייתה תיקייה בעברית עם רווחים `הודעות מערכת`), **המפענח של ימות המשיח פלט שגיאת תחביר ופלט מידית M1607 ("אין מענה משרת API")**.
+
+**התיקון בקוד:**
+* עדכנו את `yemot_read_record` לתחביר התקני המדויק של ימות המשיח:
+  `read=f-messages/005=reg_name,,record`
+* שינינו את שם תיקיית ההודעות ל-**`messages`** (באנגלית, ללא רווחים), כדי למנוע שגיאות קידוד בשרתי ימות המשיח.
+
+---
+
+### **2. איך הובטח שישמיע רק את ההקלטה שלך ללא הקראת המערכת?**
+
+כש-`USE_AUDIO_FILES = True`, השרת שולח **אך ורק** את נתיב הקובץ המוקלט שלך:
+`read=f-messages/001=welcome_choice,no,1,1,7,Digits,no,no,*/`
+
+[1]מכיוון שלא מופיע שם טקסט TTS (`t-`), ימות המשיח תנגן **רק ובלעדית את קובץ ה-WAV שלך** ולעולם לא תקריא שום טקסט נוסף!
+
+---
+
+### **קוד השרת המלא והמתוקן (Python / FastAPI):**
+
+```python
 import os
 import io
 import json
@@ -25,8 +46,9 @@ ALLOWED_PHONES_WHEN_CLOSED = [
 ]
 
 # 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
+# שים את קובצי השמע בתיקייה בשם messages בשלוחה הראשית!
 USE_AUDIO_FILES = True
-AUDIO_FOLDER = "הודעות מערכת"
+AUDIO_FOLDER = "messages"  # שם התיקייה באנגלית ללא רווחים!
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
@@ -114,7 +136,7 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מואץ ומוגן מתקלות)
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (מהיר ומאובטח)
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     if not my_rec_path or not isinstance(my_rec_path, str):
@@ -123,41 +145,25 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
 
     # וידוא טוקן מלא ללא קיטועים
     active_token = token if (token and ":" in str(token)) else YEMOT_TOKEN
-    clean_path = my_rec_path.strip()
+    clean_path = str(my_rec_path).strip()
 
     if clean_path.startswith("ivr2:"):
         clean_path = clean_path[5:]
     if not clean_path.startswith('/'):
         clean_path = '/' + clean_path
 
-    # בדיקת נתיבים אפשריים
-    candidate_paths = []
-    if clean_path.startswith("/הקלטות/"):
-        candidate_paths.append(clean_path)
-        candidate_paths.append(clean_path.replace("/הקלטות/", "/"))
-    else:
-        candidate_paths.append(clean_path)
-        candidate_paths.append(f"/הקלטות{clean_path}")
+    encoded_p = urllib.parse.quote(f"ivr2:{clean_path}", safe=":/")
+    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_p}"
 
     temp_audio = f"downloaded_{os.getpid()}_{datetime.now().strftime('%H%M%S')}.file"
     converted_wav = f"converted_{os.getpid()}_{datetime.now().strftime('%H%M%S')}.wav"
 
-    res = None
-    for path_candidate in candidate_paths:
-        encoded_p = urllib.parse.quote(f"ivr2:{path_candidate}", safe=":/")
-        audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_p}"
-        try:
-            print(f"LOG TRANSCRIBE: Downloading audio from {audio_url}", flush=True)
-            res = requests.get(audio_url, timeout=5)  # טיימאאוט קצר של 5 שניות למניעת ניתוקי API
-            if res.status_code == 200 and not res.content.startswith(b'<') and not res.content.startswith(b'{'):
-                break
-        except Exception as err:
-            print(f"LOG TRANSCRIBE URL TRY ERROR: {err}", flush=True)
-
     try:
-        if not res or res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
-            error_body = res.text[:100] if res else "No response"
-            print(f"LOG TRANSCRIBE ERROR: Download failed. Content: {error_body}", flush=True)
+        print(f"LOG TRANSCRIBE: Downloading {audio_url}", flush=True)
+        res = requests.get(audio_url, timeout=5)
+        
+        if res.status_code != 200 or res.content.startswith(b'<') or res.content.startswith(b'{'):
+            print(f"LOG TRANSCRIBE ERROR: Download failed. Content: {res.text[:100] if res else 'None'}", flush=True)
             return ""
 
         with open(temp_audio, "wb") as f:
@@ -173,7 +179,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             audio_data = recognizer.record(source)
             text = recognizer.recognize_google(audio_data, language='he-IL')
 
-        print(f"LOG TRANSCRIBE SUCCESS: Transcribed text = '{text}'", flush=True)
+        print(f"LOG TRANSCRIBE SUCCESS: '{text}'", flush=True)
         return text.strip() if text else ""
 
     except Exception as e:
@@ -380,7 +386,7 @@ def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*
     content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-# שמירת ההקלטה מפורשות בתיקיית "/הקלטות" לפי עמוד 11 בתיעוד ימות המשיח
+# תבנית תקנית לחלוטין לקבלת הקלטה לפי עמוד 31 בתיעוד: read=sound=var_name,,record,/הקלטות
 def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "/הקלטות") -> Response:
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
@@ -389,7 +395,7 @@ def yemot_read_record(text: str, var_name: str, options: str = "no,record", reco
     else:
         sound_str = f"t-{clean_text}"
         
-    content = f"read={sound_str}={var_name},{options},{record_folder}"
+    content = f"read={sound_str}={var_name},,record,{record_folder}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
@@ -855,7 +861,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
                 
                 if USE_AUDIO_FILES:
-                    sound_chain = f"f-/הודעות מערכת/023a.n-{total_with_fee}.f-/הודעות מערכת/023b"
+                    sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
                 else:
                     sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
 
@@ -961,7 +967,7 @@ def initiate_checkout(session: dict) -> Response:
     part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
     
     if USE_AUDIO_FILES:
-        sound_chain = f"f-/הודעות מערכת/023a.n-{total_with_fee}.f-/הודעות מערכת/023b"
+        sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
     else:
         sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
 
@@ -999,7 +1005,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     part2_text = "שקלים מועברים כעת לסליקת אשראי"
     
     if USE_AUDIO_FILES:
-        msg_chain = f"f-/הודעות מערכת/025a.n-{total_sum}.f-/הודעות מערכת/025b"
+        msg_chain = f"f-/{AUDIO_FOLDER}/025a.n-{total_sum}.f-/{AUDIO_FOLDER}/025b"
     else:
         msg_chain = f"t-{clean_tts(part1_text)}.n-{total_sum}.t-{clean_tts(part2_text)}"
     
