@@ -20,8 +20,8 @@ IS_SYSTEM_OPEN = False
 
 # רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
 ALLOWED_PHONES_WHEN_CLOSED = [
-    "0533160009",
-    "0527143207"
+    "0501234567",
+    "0529999999"
 ]
 
 # 2. הגדר ל- True במידה והעלית את קובצי השמע (001.wav, 002.wav וכו')
@@ -116,7 +116,7 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (תיקון נתיב לוחסן //)
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (עם מנגנון ניסיונות מרובים)
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     print(f"\n=======================================================", flush=True)
@@ -127,33 +127,53 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         print("LOG ERROR: נתיב הקלטה ריק או לא תקין", flush=True)
         return ""
 
-    active_token = token or YEMOT_TOKEN
-    clean_path = str(my_rec_path).strip()
+    active_token = (token or YEMOT_TOKEN or "").strip()
+    print(f"LOG [תמלול שמע]: עושה שימוש בטוקן: '{active_token}'", flush=True)
 
-    # ניקוי קידומות נפוצות
-    clean_path = clean_path.replace("Digits-", "").replace("val_name-", "")
+    raw_path = str(my_rec_path).strip()
+    clean_path = raw_path.replace("Digits-", "").replace("val_name-", "").strip()
     if clean_path.startswith("ivr2:"):
         clean_path = clean_path[5:]
-    elif clean_path.startswith("ivr2/"):
-        clean_path = clean_path[5:]
-        
-    # הסרת כל הלוחסינים בתחילת המחרוזת והגדרת לוחסן יחיד בלבד
-    clean_path = "/" + clean_path.strip().lstrip('/')
+    clean_path = "/" + clean_path.lstrip('/')
 
-    audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
-    print(f"LOG [תמלול שמע]: מוריד קובץ שמע מ-URL מתוקן: {audio_url}", flush=True)
+    # רשימת נתיבים אפשריים לבדיקה מול ה-API של ימות המשיח
+    possible_paths = [
+        f"ivr2:{clean_path}",                     # ivr2:/010.wav
+        f"ivr2:{raw_path}",                      # ivr2://010.wav
+        clean_path,                              # /010.wav
+        clean_path.lstrip('/')                   # 010.wav
+    ]
+
+    # הסרת כפילויות תוך שמירה על הסדר
+    unique_paths = []
+    for p in possible_paths:
+        if p not in unique_paths:
+            unique_paths.append(p)
+
+    res = None
+    for try_path in unique_paths:
+        encoded_path = urllib.parse.quote(try_path, safe=':/')
+        audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_path}"
+        print(f"LOG [תמלול שמע]: מנסה להוריד מ-URL: {audio_url}", flush=True)
+        
+        try:
+            r = requests.get(audio_url, timeout=10)
+            print(f"LOG [תמלול שמע]: תגובה מ-Yemot: Status {r.status_code}, גודל: {len(r.content)} bytes", flush=True)
+            if r.status_code == 200 and len(r.content) >= 100 and not r.content.startswith(b'<') and not r.content.startswith(b'{'):
+                res = r
+                print(f"LOG [תמלול שמע]: הורדת קובץ שמע הצליחה בנתיב: {try_path}", flush=True)
+                break
+        except Exception as err:
+            print(f"LOG ERROR [תמלול שמע]: שגיאה בחיבור בנתיב {try_path}: {err}", flush=True)
+
+    if not res:
+        print(f"LOG ERROR [תמלול שמע]: כל ניסיונות ההורדה נכשלו עבור הקובץ '{my_rec_path}'. וודא שהטוקן תקין והקובץ קיים במערכת.", flush=True)
+        return ""
 
     temp_audio = f"downloaded_{os.getpid()}.file"
     converted_wav = f"converted_{os.getpid()}.wav"
 
     try:
-        res = requests.get(audio_url, timeout=30)
-        print(f"LOG [תמלול שמע]: הורדת הקובץ הסתיימה. Status: {res.status_code}, גודל: {len(res.content)} bytes", flush=True)
-
-        if res.status_code != 200 or len(res.content) < 100 or res.content.startswith(b'<') or res.content.startswith(b'{'):
-            print(f"LOG ERROR [תמלול שמע]: הורדת קובץ שמע נכשלה. התקבל תוכן לא תקין: {res.content[:150]}", flush=True)
-            return ""
-
         with open(temp_audio, "wb") as f:
             f.write(res.content)
 
@@ -387,10 +407,13 @@ def yemot_read_tts(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,
     content = f"read=t-{clean_text}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-def yemot_read_record_tts(text: str, var_name: str, options: str = "no,record", record_folder: str = "/") -> Response:
+def yemot_read_record_tts(text: str, var_name: str, options: str = "no,record", record_folder: str = "") -> Response:
     """פונקציה ייעודית להקלטת שמע עם הנחיה קולית ב-TTS בלבד"""
     clean_text = clean_tts(text)
-    content = f"read=t-{clean_text}={var_name},{options},{record_folder}"
+    if record_folder and record_folder != "/":
+        content = f"read=t-{clean_text}={var_name},{options},{record_folder}"
+    else:
+        content = f"read=t-{clean_text}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
@@ -951,7 +974,7 @@ def start_product_loop(session: dict) -> Response:
     ]
     if not filtered:
         session["step"] = "MAIN_MENU"
-        return yemot_read("לאמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+        return yemot_read("לא נמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
     session["filtered_products"] = filtered
     session["product_index"] = 0
     session["step"] = "PRODUCT_LOOP"
