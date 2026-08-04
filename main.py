@@ -20,17 +20,17 @@ IS_SYSTEM_OPEN = False
 
 # רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
 ALLOWED_PHONES_WHEN_CLOSED = [
-    "0533160009",
-    "0527143207"
+    "0501234567",
+    "0529999999"
 ]
 
-# 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
+# 2. שימוש בקובצי שמע מוקלטים (עם גיבוי TTS אוטומטי אם קובץ חסר)
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
-YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "0795322222:123456")
+YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
 # הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס, תשלום 1 בלבד)
@@ -80,15 +80,15 @@ PROMPT_FILE_MAP = {
     "reg_phone": "009",
     "reg_address": "010",
     "reg_community_code": "012",
-    "personal_choice": "014",
+    "personal_choice": "014d",
     "new_community_code": "015",
-    "cat_choice": "017",
-    "kashrut_choice": "017",
-    "catalog_choice": "018",
-    "qty_input": "020",
-    "product_choice": "022",
-    "after_add_choice": "022",
-    "checkout_confirm_choice": "023",
+    "cat_choice": "017b",
+    "kashrut_choice": "017b",
+    "catalog_choice": "018f",
+    "qty_input": "020a",
+    "product_choice": "022f",
+    "after_add_choice": "022g",
+    "checkout_confirm_choice": "023b",
     "restore_cart_choice": "026"
 }
 
@@ -136,15 +136,13 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         clean_path = clean_path[5:]
     clean_path = "/" + clean_path.lstrip('/')
 
-    # רשימת נתיבים אפשריים לבדיקה מול ה-API של ימות המשיח
     possible_paths = [
-        f"ivr2:{clean_path}",                     # ivr2:/010.wav
-        f"ivr2:{raw_path}",                      # ivr2://010.wav
-        clean_path,                              # /010.wav
-        clean_path.lstrip('/')                   # 010.wav
+        f"ivr2:{clean_path}",
+        f"ivr2:{raw_path}",
+        clean_path,
+        clean_path.lstrip('/')
     ]
 
-    # הסרת כפילויות תוך שמירה על הסדר
     unique_paths = []
     for p in possible_paths:
         if p not in unique_paths:
@@ -154,11 +152,9 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
     for try_path in unique_paths:
         encoded_path = urllib.parse.quote(try_path, safe=':/')
         audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path={encoded_path}"
-        print(f"LOG [תמלול שמע]: מנסה להוריד מ-URL: {audio_url}", flush=True)
         
         try:
             r = requests.get(audio_url, timeout=10)
-            print(f"LOG [תמלול שמע]: תגובה מ-Yemot: Status {r.status_code}, גודל: {len(r.content)} bytes", flush=True)
             if r.status_code == 200 and len(r.content) >= 100 and not r.content.startswith(b'<') and not r.content.startswith(b'{'):
                 res = r
                 print(f"LOG [תמלול שמע]: הורדת קובץ שמע הצליחה בנתיב: {try_path}", flush=True)
@@ -178,10 +174,8 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             f.write(res.content)
 
         if not convert_audio_to_pcm_wav(temp_audio, converted_wav):
-            print("LOG WARNING [תמלול שמע]: המרת FFmpeg נכשלה, מנסה לתמלל ישירות מגרסת המקור", flush=True)
             target_wav = temp_audio
         else:
-            print("LOG [תמלול שמע]: המרת FFmpeg ל-WAV PCM הושלמה בהצלחה", flush=True)
             target_wav = converted_wav
 
         recognizer = sr.Recognizer()
@@ -190,12 +184,10 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             
             try:
                 text = recognizer.recognize_google(audio_data, language='he-IL')
-                print(f"\n=======================================================", flush=True)
                 print(f"=====> תוצאת התמלול שהתקבלה מ-Google: '{text}' <=====", flush=True)
-                print(f"=======================================================\n", flush=True)
                 return text.strip() if text else ""
             except sr.UnknownValueError:
-                print("\n=====> תוצאת התמלול: [לא הצליח לזהות מילים / הקלטה שקטה/לא ברורה] <=====\n", flush=True)
+                print("=====> תוצאת התמלול: [לא הצליח לזהות מילים / הקלטה שקטה/לא ברורה] <=====", flush=True)
                 return ""
             except sr.RequestError as e:
                 print(f"LOG ERROR [תמלול שמע]: SpeechRecognition שגיאת תקשורת: {e}", flush=True)
@@ -372,23 +364,23 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
     if "קוד הקהילה עודכן" in text:
         return "016"
     if "אין כרגע מוצרים בקטלוג" in text:
-        return "018"
+        return "018f"
     if "סל הקניות שלך ריק" in text:
         return "019"
     if "כמות חייבת להיות גדולה מאפס" in text:
-        return "020"
+        return "020b"
     if "מספרים בלבד" in text:
         return "021"
     if "ההזמנה בוטלה" in text:
         return "024"
     if "סך הכל לתשלום" in text and "מועברים" in text:
-        return "025"
+        return "025b"
     if "יש לך הזמנה פתוחה" in text:
         return "026"
     return PROMPT_FILE_MAP.get(var_name, "001")
 
 # -------------------------------------------------------------------
-# פונקציות מענה לימות המשיח (משלבות קובץ שמע + גיבוי TTS אוטומטי)
+# פונקציות מענה לימות המשיח (עם תמיכה מורחבת בקבצים + גיבוי TTS)
 # -------------------------------------------------------------------
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
@@ -426,7 +418,6 @@ def yemot_msg(text: str) -> Response:
     content = f"id_list_message={sound_str}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-# בדיקה האם קיימת ללקוח הזמנה פתוחה שלא שולמה
 async def check_abandoned_cart_or_proceed(session: dict, background_tasks: BackgroundTasks) -> Response:
     user = session.get("user", {})
     user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or session.get("phone")
@@ -500,7 +491,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if not user_input:
                 return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
             
-            # בדיקת סגירת המערכת לשלוחות 2, 3, 4, 5 (חוסם את כולם פרט למספרים מורשים ב-ALLOWED_PHONES_WHEN_CLOSED)
             user_obj = session.get("user") or CACHE["users"].get(phone) or {}
             user_id = get_field(user_obj, "תעודת זהות", "id_number") or get_field(user_obj, "מספר טלפון", "phone") or phone
             is_vip = (phone in ALLOWED_PHONES_WHEN_CLOSED) or (user_id in ALLOWED_PHONES_WHEN_CLOSED)
@@ -514,7 +504,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
                 return Response(content=content, media_type="text/plain; charset=utf-8")
 
-            # מעבר מידי לשלוחה 1 ללא הודעה מקדימה
             if user_input == "1":
                 return Response(content="go_to_folder=/1", media_type="text/plain; charset=utf-8")
                 
@@ -549,11 +538,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 session["step"] = "CATALOG_LOOP"
                 return play_catalog_product(session)
                 
-            # מעבר מידי לשלוחה 6 ללא הודעה מקדימה
             elif user_input == "6":
                 return Response(content="go_to_folder=/6", media_type="text/plain; charset=utf-8")
 
-            # מעבר מידי לשלוחה 7 ללא הודעה מקדימה
             elif user_input == "7":
                 return Response(content="go_to_folder=/7", media_type="text/plain; charset=utf-8")
                 
@@ -609,12 +596,10 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
             
             if user_input == "1":
-                # להמשך קנייה זו - שחזור סל קודם
                 session["cart"] = SAVED_CARTS.get(user_id, [])
                 session["step"] = "MAIN_MENU"
                 return await show_categories(session, prefix="ממשיכים את ההזמנה הקודמת, ")
             elif user_input == "2":
-                # להתחלת קנייה חדשה - איפוס סל
                 session["cart"] = []
                 if user_id in SAVED_CARTS:
                     del SAVED_CARTS[user_id]
@@ -656,7 +641,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
         # ---------------------------------------------------------
-        # תהליך הרשמה (תמלול והנחיות)
+        # תהליך הרשמה (תמלול ואישור מבוססי קובצי שמע + TTS)
         # ---------------------------------------------------------
         elif step == "REG_NAME":
             print(f"LOG [REG_NAME]: התקבל קלט להקלטת שם: '{raw_user_input}'", flush=True)
@@ -673,7 +658,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             session["step"] = "REG_NAME_CONFIRM"
             
             clean_name = clean_tts(transcribed_text)
-            sound_chain = f"t-השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            if USE_AUDIO_FILES:
+                sound_chain = f"f-/{AUDIO_FOLDER}/027a.t-השם שנקלט הוא.t-{clean_name}.f-/{AUDIO_FOLDER}/027b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            else:
+                sound_chain = f"t-השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                
             content = f"read={sound_chain}=reg_name_confirm_choice,no,1,1,7,Digits,no,no,*/"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -687,7 +676,10 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
             else:
                 clean_name = clean_tts(session["reg_data"].get("temp_name", ""))
-                sound_chain = f"t-הקשה שגויה. השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                if USE_AUDIO_FILES:
+                    sound_chain = f"f-/{AUDIO_FOLDER}/027a.t-הקשה שגויה, השם שנקלט הוא.t-{clean_name}.f-/{AUDIO_FOLDER}/027b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                else:
+                    sound_chain = f"t-הקשה שגויה, השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
                 content = f"read={sound_chain}=reg_name_confirm_choice,no,1,1,7,Digits,no,no,*/"
                 return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -724,7 +716,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             session["step"] = "REG_ADDRESS_CONFIRM"
             
             clean_addr = clean_tts(transcribed_text)
-            sound_chain = f"t-הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            if USE_AUDIO_FILES:
+                sound_chain = f"f-/{AUDIO_FOLDER}/028a.t-הכתובת שנקלטה היא.t-{clean_addr}.f-/{AUDIO_FOLDER}/028b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            else:
+                sound_chain = f"t-הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                
             content = f"read={sound_chain}=reg_address_confirm_choice,no,1,1,7,Digits,no,no,*/"
             return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -738,7 +734,10 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
             else:
                 clean_addr = clean_tts(session["reg_data"].get("temp_address", ""))
-                sound_chain = f"t-הקשה שגויה. הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                if USE_AUDIO_FILES:
+                    sound_chain = f"f-/{AUDIO_FOLDER}/028a.t-הקשה שגויה, הכתובת שנקלטה היא.t-{clean_addr}.f-/{AUDIO_FOLDER}/028b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
+                else:
+                    sound_chain = f"t-הקשה שגויה, הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
                 content = f"read={sound_chain}=reg_address_confirm_choice,no,1,1,7,Digits,no,no,*/"
                 return Response(content=content, media_type="text/plain; charset=utf-8")
 
@@ -823,7 +822,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if user_input == "1":
                 session["step"] = "QTY_INPUT"
                 p = products[idx]
-                return yemot_read(f"הקש את מספר הפריטים שברצונך להזמין ממוצר {p['name']}", "qty_input", "no,3,1,7,Digits,no,no,*/")
+                return yemot_read_qty(p['name'])
             elif user_input == "2":
                 next_idx = (idx + 1) % len(products)
                 session["product_index"] = next_idx
@@ -854,7 +853,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return play_catalog_product(session, prefix="הקשה שגויה, ")
 
         # ---------------------------------------------------------
-        # שלב 5: הזנת כמות (שמירת הסל בזמן אמת עבור המשתמש)
+        # שלב 5: הזנת כמות
         # ---------------------------------------------------------
         elif step == "QTY_INPUT":
             try:
@@ -872,7 +871,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     "total": total_price
                 })
                 
-                # עדכון סל פתוח בזיכרון בזמן אמת
                 user = session.get("user") or {}
                 user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
                 if user_id:
@@ -941,12 +939,22 @@ def show_personal_area(session: dict, prefix: str = "") -> Response:
         return yemot_read("לאזור האישי אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,1,7,Digits,no,no,*/")
         
     session["step"] = "PERSONAL_AREA"
-    name = get_field(user, "שם פרטי ומשפחה", "שם פרטי", "first_name")
-    addr = get_field(user, "כתובת", "address")
-    code = get_field(user, "קוד קהילה", "community_code", default="לא עודכן")
+    name = clean_tts(get_field(user, "שם פרטי ומשפחה", "שם פרטי", "first_name"))
+    addr = clean_tts(get_field(user, "כתובת", "address"))
+    code = clean_tts(get_field(user, "קוד קהילה", "community_code", default="לא עודכן"))
     
-    msg = f"{prefix}שלום {name}, הכתובת הרשומה במערכת היא {addr}, קוד הקהילה הרשום במערכת הוא {code}. לחזרה לתפריט הראשי הקישו 1, לעדכון קוד הקהילה הקישו 2"
-    return yemot_read(msg, "personal_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+    if USE_AUDIO_FILES:
+        sound_chain = (
+            f"f-/{AUDIO_FOLDER}/014a.t-שלום.t-{name}."
+            f"f-/{AUDIO_FOLDER}/014b.t-הכתובת הרשומה במערכת היא.t-{addr}."
+            f"f-/{AUDIO_FOLDER}/014c.t-קוד הקהילה הרשום במערכת הוא.t-{code}."
+            f"f-/{AUDIO_FOLDER}/014d.t-לחזרה לתפריט הראשי הקישו 1, לעדכון קוד הקהילה הקישו 2"
+        )
+    else:
+        sound_chain = f"t-שלום {name}, הכתובת הרשומה במערכת היא {addr}, קוד הקהילה הרשום במערכת הוא {code}. לחזרה לתפריט הראשי הקישו 1, לעדכון קוד הקהילה הקישו 2"
+
+    content = f"read={sound_chain}=personal_choice,no,1,1,7,no,no,no,*/,,,,,,no"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 async def show_categories(session: dict, prefix: str = "") -> Response:
     if not session.get("user"):
@@ -957,12 +965,19 @@ async def show_categories(session: dict, prefix: str = "") -> Response:
     cats = CACHE["categories"]
     if not cats:
         return yemot_msg("מצטערים, אין כרגע קטגוריות זמינות")
-    text = prefix + "לתפריט ההזמנות: "
+        
+    cats_text = ""
     for i, c in enumerate(cats, 1):
-        text += f"ל{c['category_name']} הקישו {i}, "
-    text += "לסיום הקנייה ומעבר לתשלום הקישו 9"
+        cats_text += f"ל{c['category_name']} הקישו {i}, "
+
+    if USE_AUDIO_FILES:
+        sound_chain = f"f-/{AUDIO_FOLDER}/017a.t-לתפריט ההזמנות.t-{clean_tts(prefix + cats_text)}.f-/{AUDIO_FOLDER}/017b.t-לסיום הקנייה ומעבר לתשלום הקישו 9"
+    else:
+        sound_chain = f"t-{clean_tts(prefix)} לתפריט ההזמנות: {clean_tts(cats_text)} לסיום הקנייה ומעבר לתשלום הקישו 9"
+
     session["step"] = "MAIN_MENU"
-    return yemot_read(text, "cat_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+    content = f"read={sound_chain}=cat_choice,no,1,1,7,no,no,no,*/,,,,,,no"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def start_product_loop(session: dict) -> Response:
     cat = str(session.get("selected_cat", "")).strip()
@@ -988,12 +1003,27 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
     idx = session["product_index"]
     p = products[idx]
     
-    notes_str = f" הערה: {p['notes']}," if p.get('notes') else ""
-    msg = (
-        f"{prefix}מוצר: {p['name']}, מקט {p['sku']}, מחיר ליחידה {p['price']} שקלים,{notes_str} "
-        f"להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9"
-    )
-    return yemot_read(msg, "product_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+    p_name = clean_tts(p['name'])
+    p_sku = clean_tts(p['sku'])
+    p_price = clean_tts(p['price'])
+    p_notes = clean_tts(p['notes']) if p.get('notes') else ""
+
+    if USE_AUDIO_FILES:
+        sound_chain = (
+            f"f-/{AUDIO_FOLDER}/022a.t-מוצר.t-{p_name}."
+            f"f-/{AUDIO_FOLDER}/022b.t-מקט.t-{p_sku}."
+            f"f-/{AUDIO_FOLDER}/022c.t-מחיר ליחידה.t-{p_price}."
+            f"f-/{AUDIO_FOLDER}/022d.t-שקלים."
+        )
+        if p_notes:
+            sound_chain += f"f-/{AUDIO_FOLDER}/022e.t-הערה.t-{p_notes}."
+        sound_chain += f"f-/{AUDIO_FOLDER}/022f.t-להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9"
+    else:
+        notes_str = f" הערה: {p_notes}," if p_notes else ""
+        sound_chain = f"t-{clean_tts(prefix)}מוצר: {p_name}, מקט {p_sku}, מחיר ליחידה {p_price} שקלים,{notes_str} להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9"
+
+    content = f"read={sound_chain}=product_choice,no,1,1,7,no,no,no,*/,,,,,,no"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def play_catalog_product(session: dict, prefix: str = "") -> Response:
     products = session.get("filtered_products", [])
@@ -1002,12 +1032,37 @@ def play_catalog_product(session: dict, prefix: str = "") -> Response:
     idx = session.get("product_index", 0)
     p = products[idx]
     
-    notes_str = f" הערה: {p['notes']}," if p.get('notes') else ""
-    msg = (
-        f"{prefix}מוצר: {p['name']}, מקט {p['sku']}, מחיר ליחידה {p['price']} שקלים.{notes_str} "
-        f"למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2"
-    )
-    return yemot_read(msg, "catalog_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+    p_name = clean_tts(p['name'])
+    p_sku = clean_tts(p['sku'])
+    p_price = clean_tts(p['price'])
+    p_notes = clean_tts(p['notes']) if p.get('notes') else ""
+
+    if USE_AUDIO_FILES:
+        sound_chain = (
+            f"f-/{AUDIO_FOLDER}/018a.t-מוצר.t-{p_name}."
+            f"f-/{AUDIO_FOLDER}/018b.t-מקט.t-{p_sku}."
+            f"f-/{AUDIO_FOLDER}/018c.t-מחיר ליחידה.t-{p_price}."
+            f"f-/{AUDIO_FOLDER}/018d.t-שקלים."
+        )
+        if p_notes:
+            sound_chain += f"f-/{AUDIO_FOLDER}/018e.t-הערה.t-{p_notes}."
+        sound_chain += f"f-/{AUDIO_FOLDER}/018f.t-למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2"
+    else:
+        notes_str = f" הערה: {p_notes}," if p_notes else ""
+        sound_chain = f"t-{clean_tts(prefix)}מוצר: {p_name}, מקט {p_sku}, מחיר ליחידה {p_price} שקלים.{notes_str} למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2"
+
+    content = f"read={sound_chain}=catalog_choice,no,1,1,7,no,no,no,*/,,,,,,no"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+def yemot_read_qty(product_name: str) -> Response:
+    p_name = clean_tts(product_name)
+    if USE_AUDIO_FILES:
+        sound_chain = f"f-/{AUDIO_FOLDER}/020a.t-הקש את מספר הפריטים שברצונך להזמין ממוצר.t-{p_name}"
+    else:
+        sound_chain = f"t-הקש את מספר הפריטים שברצונך להזמין ממוצר {p_name}"
+        
+    content = f"read={sound_chain}=qty_input,no,3,1,7,Digits,no,no,*/"
+    return Response(content=content, media_type="text/plain; charset=utf-8")
 
 # -------------------------------------------------------------------
 # 5. תחילת יציאה לתשלום: הודעה על 10 ש"ח + אישור (1 לאישור, 2 לביטול)
@@ -1048,7 +1103,6 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     cart_sum = int(sum(item["total"] for item in cart))
     total_sum = session.get("total_sum_with_fee") or (cart_sum + 10)
     
-    # ניקוי הסל הפתוח של המשתמש מזיכרון המערכת לאחר השלמת הזמנה
     user = session.get("user") or {}
     user_id = get_field(user, "תעודת זהות", "id_number") or get_field(user, "מספר טלפון", "phone") or phone
     if user_id and user_id in SAVED_CARTS:
@@ -1068,7 +1122,6 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     else:
         msg_chain = f"t-{clean_tts(part1_text)}.n-{total_sum}.t-{clean_tts(part2_text)}"
     
-    # שליחת CREDIT_CARD_MAX_PAYMENTS (1) ו-CREDIT_CARD_CURRENCY מפורשות לסליקת תשלום אחד בלבד
     credit_card_cmd = f"credit_card={CREDIT_CARD_PROVIDER},{total_sum},{CREDIT_CARD_MAX_PAYMENTS},{CREDIT_CARD_CURRENCY},,,,{CREDIT_CARD_REGISTER_NO}"
     
     content = f"id_list_message={msg_chain}&{credit_card_cmd}"
