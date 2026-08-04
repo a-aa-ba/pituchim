@@ -30,7 +30,7 @@ AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
-YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
+YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "079532222:123456")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
 # הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס, תשלום 1 בלבד)
