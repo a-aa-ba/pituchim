@@ -24,12 +24,12 @@ ALLOWED_PHONES_WHEN_CLOSED = [
     "0527143207"
 ]
 
-# 2. שימוש בקובצי שמע מוקלטים (001.wav, 002.wav וכו')
+# 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
-# הגדרות סליקה וטוקן ימות המשיח (יש לוודא שהטוקן תקין)
+# הגדרות סליקה וטוקן ימות המשיח
 YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "0795322222:123456")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
@@ -388,13 +388,13 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
     return PROMPT_FILE_MAP.get(var_name, "001")
 
 # -------------------------------------------------------------------
-# פונקציות מענה לימות המשיח
+# פונקציות מענה לימות המשיח (משלבות קובץ שמע + גיבוי TTS אוטומטי)
 # -------------------------------------------------------------------
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
         file_num = get_prompt_file_num(clean_text, var_name)
-        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}"
+        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}.t-{clean_text}"
     else:
         sound_str = f"t-{clean_text}"
         
@@ -405,18 +405,21 @@ def yemot_read_record(text: str, var_name: str, options: str = "no,record", reco
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
         file_num = get_prompt_file_num(clean_text, var_name)
-        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}"
+        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}.t-{clean_text}"
     else:
         sound_str = f"t-{clean_text}"
         
-    content = f"read={sound_str}={var_name},{options}"
+    if record_folder and record_folder != "/":
+        content = f"read={sound_str}={var_name},{options},{record_folder}"
+    else:
+        content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_msg(text: str) -> Response:
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
         file_num = get_prompt_file_num(clean_text, "")
-        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}"
+        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}.t-{clean_text}"
     else:
         sound_str = f"t-{clean_text}"
         
@@ -506,7 +509,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
                 clean_welcome = clean_tts(welcome_text)
                 if USE_AUDIO_FILES:
-                    content = f"id_list_message=f-/{AUDIO_FOLDER}/002&read=f-/{AUDIO_FOLDER}/001=welcome_choice,no,1,1,7,Digits,no,no,*/"
+                    content = f"id_list_message=f-/{AUDIO_FOLDER}/002.t-{clean_closed}&read=f-/{AUDIO_FOLDER}/001.t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
                 else:
                     content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
                 return Response(content=content, media_type="text/plain; charset=utf-8")
@@ -653,7 +656,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
         # ---------------------------------------------------------
-        # תהליך הרשמה (תמלול והנחיות בשילוב הודעות קוליות ו-TTS לשם/כתובת)
+        # תהליך הרשמה (תמלול והנחיות)
         # ---------------------------------------------------------
         elif step == "REG_NAME":
             print(f"LOG [REG_NAME]: התקבל קלט להקלטת שם: '{raw_user_input}'", flush=True)
@@ -917,7 +920,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
                 
                 if USE_AUDIO_FILES:
-                    sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
+                    sound_chain = f"f-/{AUDIO_FOLDER}/023a.t-{clean_tts(part1_text)}.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b.t-{clean_tts(part2_text)}"
                 else:
                     sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
 
@@ -1023,7 +1026,7 @@ def initiate_checkout(session: dict) -> Response:
     part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
     
     if USE_AUDIO_FILES:
-        sound_chain = f"f-/{AUDIO_FOLDER}/023a.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b"
+        sound_chain = f"f-/{AUDIO_FOLDER}/023a.t-{clean_tts(part1_text)}.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b.t-{clean_tts(part2_text)}"
     else:
         sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
 
@@ -1061,7 +1064,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     part2_text = "שקלים מועברים כעת לסליקת אשראי"
     
     if USE_AUDIO_FILES:
-        msg_chain = f"f-/{AUDIO_FOLDER}/025a.n-{total_sum}.f-/{AUDIO_FOLDER}/025b"
+        msg_chain = f"f-/{AUDIO_FOLDER}/025a.t-{clean_tts(part1_text)}.n-{total_sum}.f-/{AUDIO_FOLDER}/025b.t-{clean_tts(part2_text)}"
     else:
         msg_chain = f"t-{clean_tts(part1_text)}.n-{total_sum}.t-{clean_tts(part2_text)}"
     
