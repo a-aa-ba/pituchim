@@ -116,7 +116,7 @@ def convert_audio_to_pcm_wav(input_path, output_path):
         return False
 
 # -------------------------------------------------------------------
-# 2. הורדת הקובץ מימות המשיח + תמלול בעברית עם לוגים מפורטים לשרת
+# 2. הורדת הקובץ מימות המשיח + תמלול בעברית (תיקון נתיב לוחסן //)
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     print(f"\n=======================================================", flush=True)
@@ -130,19 +130,18 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
     active_token = token or YEMOT_TOKEN
     clean_path = str(my_rec_path).strip()
 
-    # ניקוי קידומות נפוצות שימות המשיח מעבירים בפרמטרים
+    # ניקוי קידומות נפוצות
     clean_path = clean_path.replace("Digits-", "").replace("val_name-", "")
     if clean_path.startswith("ivr2:"):
         clean_path = clean_path[5:]
     elif clean_path.startswith("ivr2/"):
         clean_path = clean_path[5:]
         
-    clean_path = clean_path.strip()
-    if not clean_path.startswith('/'):
-        clean_path = '/' + clean_path
+    # הסרת כל הלוחסינים בתחילת המחרוזת והגדרת לוחסן יחיד בלבד
+    clean_path = "/" + clean_path.strip().lstrip('/')
 
     audio_url = f"https://www.call2all.co.il/ym/api/DownloadFile?token={active_token}&path=ivr2:{clean_path}"
-    print(f"LOG [תמלול שמע]: מוריד קובץ שמע מ-URL: {audio_url}", flush=True)
+    print(f"LOG [תמלול שמע]: מוריד קובץ שמע מ-URL מתוקן: {audio_url}", flush=True)
 
     temp_audio = f"downloaded_{os.getpid()}.file"
     converted_wav = f"converted_{os.getpid()}.wav"
@@ -952,7 +951,7 @@ def start_product_loop(session: dict) -> Response:
     ]
     if not filtered:
         session["step"] = "MAIN_MENU"
-        return yemot_read("לא נמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+        return yemot_read("לאמצאו מוצרים בקטגוריה זו, מעביר אותך חזרה לקטגוריות", "cat_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
     session["filtered_products"] = filtered
     session["product_index"] = 0
     session["step"] = "PRODUCT_LOOP"
