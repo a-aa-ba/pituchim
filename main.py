@@ -15,22 +15,27 @@ import speech_recognition as sr
 app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
-# 1. הגדרה לפתיחה/סגירה של שלוחות 2, 3, 4, 5 (False = סגור, True = פתוח)
-IS_SYSTEM_OPEN = False
+# 1. הגדרה לפתיחה/סגירה פרטנית של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
+OPEN_BRANCHES = {
+    "2": False,  # שלוחה 2: כניסה למערכת ההזמנות
+    "3": False,  # שלוחה 3: רישום למערכת ההזמנות
+    "4": False,  # שלוחה 4: אזור אישי
+    "5": True   # שלוחה 5: שמיעת הקטלוג המלא
+}
 
 # רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
 ALLOWED_PHONES_WHEN_CLOSED = [
-    "0501234567",
-    "0529999999"
+    "0533160009",
+    "0527123207"
 ]
 
-# 2. שימוש בקובצי שמע מוקלטים (עם גיבוי TTS אוטומטי אם קובץ חסר)
+# 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
-YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
+YEMOT_TOKEN = "0795322222:123456"
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
 
 # הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס, תשלום 1 בלבד)
@@ -380,7 +385,7 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
     return PROMPT_FILE_MAP.get(var_name, "001")
 
 # -------------------------------------------------------------------
-# פונקציות מענה לימות המשיח (עם תמיכה מורחבת בקבצים + גיבוי TTS)
+# פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
@@ -495,7 +500,8 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             user_id = get_field(user_obj, "תעודת זהות", "id_number") or get_field(user_obj, "מספר טלפון", "phone") or phone
             is_vip = (phone in ALLOWED_PHONES_WHEN_CLOSED) or (user_id in ALLOWED_PHONES_WHEN_CLOSED)
 
-            if not IS_SYSTEM_OPEN and not is_vip and user_input in ["2", "3", "4", "5"]:
+            # בדיקת סגירת שלוחות 2, 3, 4, 5 באופן פרטני לפי OPEN_BRANCHES
+            if user_input in ["2", "3", "4", "5"] and not OPEN_BRANCHES.get(user_input, True) and not is_vip:
                 clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
                 clean_welcome = clean_tts(welcome_text)
                 if USE_AUDIO_FILES:
@@ -641,7 +647,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
 
         # ---------------------------------------------------------
-        # תהליך הרשמה (תמלול ואישור מבוססי קובצי שמע + TTS)
+        # תהליך הרשמה (תמלול ואישור)
         # ---------------------------------------------------------
         elif step == "REG_NAME":
             print(f"LOG [REG_NAME]: התקבל קלט להקלטת שם: '{raw_user_input}'", flush=True)
