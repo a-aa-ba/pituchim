@@ -36,7 +36,7 @@ AUDIO_FOLDER = "הודעות מערכת"
 
 # הגדרות סליקה וטוקן ימות המשיח
 YEMOT_TOKEN = "0795322222:123456"
-APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx7Uk7ltg9ZmaLKbh_SBrt1y_dQIMBmPbkhOSA0zEn4Ls77HXgghwGaiLMiln7chcQmfA/exec"
 
 # הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס, תשלום 1 בלבד)
 CREDIT_CARD_PROVIDER = "nedarim_plus"
