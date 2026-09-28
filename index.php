@@ -1,152 +1,91 @@
 <?php
- 
+
 header('Content-Type: text/plain; charset=utf-8');
- 
-$apiCallId = $_REQUEST['ApiCallId'] ?? '';
+
+$apiCallId    = $_REQUEST['ApiCallId'] ?? '';
 $apiExtension = $_REQUEST['ApiExtension'] ?? '';
-$hangup = $_REQUEST['hangup'] ?? '';
-$what = $_REQUEST['what'] ?? '';
- 
+$hangup       = $_REQUEST['hangup'] ?? '';
+$what         = $_REQUEST['what'] ?? '';
+$skip         = $_REQUEST['skip'] ?? '';
+
 if ($apiCallId === '') {
     exit('Missing ApiCallId');
 }
- 
-if ($apiExtension === '') {
-    exit('Missing ApiExtension');
-}
- 
+
+// קובץ זמני לשמירת מיקום הקובץ של השיחה הנוכחית
+$sessionFile = __DIR__ . "/session_{$apiCallId}.json";
+
+// ניקוי הנתונים בסיום שיחה
 if ($hangup === 'yes') {
- 
-    foreach (glob(__DIR__ . '/counter_*.txt') as $counterFile) {
- 
-        $counters = json_decode(file_get_contents($counterFile), true);
- 
-        if (!is_array($counters)) {
-            continue;
-        }
- 
-        unset($counters[$apiCallId]);
- 
-        file_put_contents(
-            $counterFile,
-            json_encode($counters),
-            LOCK_EX
-        );
+    if (file_exists($sessionFile)) {
+        unlink($sessionFile);
     }
- 
     exit('hangup_ok');
 }
- 
-$extensionKey = trim($apiExtension, '/');
-$extensionKey = str_replace('/', '_', $extensionKey);
- 
-if ($extensionKey === '') {
-    exit('Invalid ApiExtension');
-}
- 
-$configFile = __DIR__ . "/settings_{$extensionKey}.txt";
-$dataFile = __DIR__ . "/counter_{$extensionKey}.txt";
- 
-if (!file_exists($configFile)) {
-    exit('Missing settings file');
-}
- 
-if (!file_exists($dataFile)) {
-    file_put_contents(
-        $dataFile,
-        json_encode([]),
-        LOCK_EX
-    );
-}
- 
-$counters = json_decode(file_get_contents($dataFile), true);
- 
-if (!is_array($counters)) {
-    $counters = [];
-}
- 
-$steps = [];
-$offset = null;
- 
-foreach (file($configFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
- 
-    $line = trim($line);
- 
-    if ($line === '') {
-        continue;
+
+// -------------------------------------------------------------
+// שלב 2: המאזין כבר הקיש את כמות הקבצים לדילוג
+// -------------------------------------------------------------
+if ($skip !== '') {
+    if (!file_exists($sessionFile)) {
+        exit('Session expired');
     }
- 
-    if (preg_match('/^offset\s*=\s*(-?\d+)$/i', $line, $match)) {
-        $offset = (int)$match[1];
-        continue;
+
+    $sessionData = json_decode(file_get_contents($sessionFile), true);
+    if (file_exists($sessionFile)) {
+        unlink($sessionFile); // מחיקת הקובץ הזמני לאחר שימוש
     }
- 
-    if (!str_contains($line, '=')) {
-        continue;
+
+    $currentFile    = (int)($sessionData['file'] ?? 1);
+    $originalLength = (int)($sessionData['length'] ?? 3);
+    $extension      = $sessionData['extension'] ?? $apiExtension;
+
+    $skipCount = (int)$skip;
+
+    // חישוב הקובץ החדש (דילוג קדימה)
+    $targetNumber = $currentFile + $skipCount;
+
+    // מניעת ירידה מתחת לקובץ 1
+    if ($targetNumber < 1) {
+        $targetNumber = 1;
     }
- 
-    [$index, $value] = explode('=', $line, 2);
- 
-    if (!is_numeric($index)) {
-        continue;
-    }
- 
-    $steps[(int)$index] = trim($value);
-}
- 
-if ($offset !== null) {
- 
-    if ($what === '') {
-        exit('Missing what');
-    }
- 
-    $fileName = basename($what);
- 
-    $dotPos = strrpos($fileName, '.');
- 
-    if ($dotPos !== false) {
-        $fileName = substr($fileName, 0, $dotPos);
-    }
- 
-    if (!ctype_digit($fileName)) {
-        exit('Invalid filename in what');
-    }
- 
-    $originalLength = strlen($fileName);
- 
-    $targetNumber = ((int)$fileName + $offset);
- 
-    $target = str_pad(
-        (string)$targetNumber,
-        $originalLength,
-        '0',
-        STR_PAD_LEFT
-    );
- 
-    echo 'go_to_folder_and_play=' . $apiExtension . ',' . $target;
+
+    // החזרת האפסים המובילים (לדוגמה: 025)
+    $target = str_pad((string)$targetNumber, $originalLength, '0', STR_PAD_LEFT);
+
+    // שליחת פקודה לימות המשיח לקפוץ לקובץ המבוקש
+    echo 'go_to_folder_and_play=' . $extension . ',' . $target;
     exit;
 }
- 
-ksort($steps);
- 
-if (empty($steps)) {
-    exit('No steps configured');
+
+// -------------------------------------------------------------
+// שלב 1: המאזין לחץ על מקש הדילוג -> שואלים כמה לדלג
+// -------------------------------------------------------------
+if ($what === '' || $apiExtension === '') {
+    exit('Missing what or ApiExtension');
 }
- 
-$currentStep = $counters[$apiCallId] ?? 0;
- 
-if (isset($steps[$currentStep])) {
-    $target = $steps[$currentStep];
-} else {
-    $target = end($steps);
+
+// חילוץ מספר הקובץ הנוכחי שמושמע
+$fileName = basename($what);
+$dotPos = strrpos($fileName, '.');
+if ($dotPos !== false) {
+    $fileName = substr($fileName, 0, $dotPos);
 }
- 
-$counters[$apiCallId] = $currentStep + 1;
- 
-file_put_contents(
-    $dataFile,
-    json_encode($counters),
-    LOCK_EX
-);
- 
-echo 'go_to_folder_and_play=' . $apiExtension . ',' . $target;
+
+if (!ctype_digit($fileName)) {
+    exit('Invalid filename in what');
+}
+
+// שמירת פרטי השיחה והקובץ הנוכחי
+$sessionData = [
+    'file'      => (int)$fileName,
+    'length'    => strlen($fileName),
+    'extension' => $apiExtension
+];
+file_put_contents($sessionFile, json_encode($sessionData), LOCK_EX);
+
+// הודעה קולית למאזין ב-TTS
+$promptText = 'הקישו כמה קבצים ברצונכם לדלג ובסיום סולמית';
+
+// שליחת פקודת קליטת נתונים (read) לימות המשיח
+echo "read=t-{$promptText},skip,digits,3,1,7,No,,";
