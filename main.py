@@ -15,19 +15,51 @@ import speech_recognition as sr
 app = FastAPI(title="Yemot Sales IVR System")
 
 # ===================================================================
-# 1. הגדרה לפתיחה/סגירה פרטנית של שלוחות 2, 3, 4, 5 (True = פתוח, False = סגור)
-OPEN_BRANCHES = {
-    "2": False,  # שלוחה 2: כניסה למערכת ההזמנות
-    "3": False,  # שלוחה 3: רישום למערכת ההזמנות
-    "4": False,  # שלוחה 4: אזור אישי
-    "5": True   # שלוחה 5: שמיעת הקטלוג המלא
+# 1. ניהול פתיחה וסגירה של המכירות
+# ההגדרות נשמרות בגיליון Google Sheets נפרד ומנוהלות דרך ממשק הגיליון.
+SALES_CONTROL_URL = os.environ.get("SALES_CONTROL_URL", "").strip()
+SALES_CONTROL_KEY = os.environ.get("SALES_CONTROL_KEY", "").strip()
+SALES_CONTROL_CACHE = {
+    "sales_open": False,
+    "exceptions": set(),
+    "loaded": False
 }
 
-# רשימת מספרי טלפון או ת.ז שמורשים להיכנס למערכת גם כשהיא סגורה (VIP)
-ALLOWED_PHONES_WHEN_CLOSED = [
-    "0533160009",
-    "0527123207"
-]
+def normalize_phone(value: str) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if digits.startswith("972") and len(digits) >= 11:
+        digits = "0" + digits[3:]
+    return digits
+
+def load_sales_control() -> bool:
+    """טעינת מצב המכירות והחריגים מגיליון הניהול."""
+    if not SALES_CONTROL_URL or not SALES_CONTROL_KEY:
+        print("LOG: הגדרות ניהול המכירות חסרות; המכירות נשארות סגורות כברירת מחדל", flush=True)
+        return False
+    try:
+        response = requests.get(
+            SALES_CONTROL_URL,
+            params={"key": SALES_CONTROL_KEY},
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data.get("sales_open"), bool) or not isinstance(data.get("exceptions"), list):
+            raise ValueError("מבנה נתוני ניהול המכירות אינו תקין")
+        SALES_CONTROL_CACHE["sales_open"] = data["sales_open"]
+        SALES_CONTROL_CACHE["exceptions"] = {
+            normalize_phone(phone) for phone in data["exceptions"] if normalize_phone(phone)
+        }
+        SALES_CONTROL_CACHE["loaded"] = True
+        print(
+            f"LOG: הגדרות מכירות נטענו בהצלחה; פתוח={data['sales_open']}, "
+            f"מספר חריגים={len(SALES_CONTROL_CACHE['exceptions'])}",
+            flush=True
+        )
+        return True
+    except Exception as error:
+        print(f"LOG ERROR בטעינת הגדרות המכירות: {error}", flush=True)
+        return False
 
 # 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
 USE_AUDIO_FILES = True
@@ -288,11 +320,18 @@ def load_data_from_sheets():
 @app.on_event("startup")
 async def startup_event():
     load_data_from_sheets()
+    load_sales_control()
 
 @app.get("/refresh-cache")
 async def refresh_cache():
     load_data_from_sheets()
-    return {"status": "success", "message": "Cache refreshed"}
+    sales_control_loaded = load_sales_control()
+    return {
+        "status": "success",
+        "message": "Cache refreshed",
+        "ניהול_מכירות_נטען": sales_control_loaded,
+        "המכירות_פתוחות": SALES_CONTROL_CACHE["sales_open"]
+    }
 
 def log_general_event(call_id: str, phone: str, event_type: str, details: str):
     if not APPS_SCRIPT_URL:
@@ -496,12 +535,14 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if not user_input:
                 return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
             
-            user_obj = session.get("user") or CACHE["users"].get(phone) or {}
-            user_id = get_field(user_obj, "תעודת זהות", "id_number") or get_field(user_obj, "מספר טלפון", "phone") or phone
-            is_vip = (phone in ALLOWED_PHONES_WHEN_CLOSED) or (user_id in ALLOWED_PHONES_WHEN_CLOSED)
+            # החרגות חלות אך ורק על כניסה להזמנות (שלוחה 2).
+            # רישום, אזור אישי והקטלוג נשארים זמינים גם כשהמכירות סגורות.
+            caller_phone = normalize_phone(phone)
+            is_order_exception = caller_phone in SALES_CONTROL_CACHE["exceptions"]
 
-            # בדיקת סגירת שלוחות 2, 3, 4, 5 באופן פרטני לפי OPEN_BRANCHES
-            if user_input in ["2", "3", "4", "5"] and not OPEN_BRANCHES.get(user_input, True) and not is_vip:
+            if user_input == "2" and (
+                not SALES_CONTROL_CACHE["sales_open"] and not is_order_exception
+            ):
                 clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
                 clean_welcome = clean_tts(welcome_text)
                 if USE_AUDIO_FILES:
