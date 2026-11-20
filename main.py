@@ -1284,6 +1284,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             )
 
         elif step == "REG_ALERTS_CHOICE":
+            if user_input not in ("1", "2"):
+                return registration_read_prompt(
+                    "לרישום לקבלת צינתוקים אישיים הקישו 1. לדילוג הקישו 2",
+                    "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
+                )
             if not persist_registration(session, background_tasks):
                 return yemot_msg("לא הצלחנו לשמור את פרטי הרישום. נא לנסות שוב מאוחר יותר")
             session["step"] = "REG_FINISH"
@@ -1291,15 +1296,10 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 session["registration_alerts_requested"] = True
                 # שלוחה C צריכה להוסיף את ApiPhone לרשימת הצינתוקים ואז להחזיר לשרת זה.
                 return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
-            if user_input == "2":
-                session["registration_alerts_requested"] = False
-                return registration_read_prompt(
-                    "הרישום נשמר. למעבר לתפריט ההזמנות הקישו 1, למעבר לתפריט הראשי הקישו 2",
-                    "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
-                )
+            session["registration_alerts_requested"] = False
             return registration_read_prompt(
-                "הקשה שגויה. לרישום לקבלת צינתוקים אישיים הקישו 1, לדילוג הקישו 2",
-                "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
+                "הרישום נשמר. למעבר לתפריט ההזמנות הקישו 1, למעבר לתפריט הראשי הקישו 2",
+                "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
             )
 
         elif step == "REG_FINISH":
