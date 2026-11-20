@@ -218,10 +218,21 @@ def save_password_hash_to_sales_control(id_number: str, password_hash: str) -> b
         logger.exception("PASSWORD_SAVE_FAILED id_number_suffix=%s", str(id_number)[-3:])
         return False
 
+def registration_read_prompt(text: str, var_name: str, options: str) -> Response:
+    """הנחיות הרישום משתמשות בקובץ המוקלט בלבד כשקובצי שמע מופעלים."""
+    clean_text = clean_tts(text)
+    if USE_AUDIO_FILES:
+        file_num = get_prompt_file_num(clean_text, var_name)
+        sound = f"f-/{AUDIO_FOLDER}/{file_num}"
+    else:
+        sound = f"t-{clean_text}"
+    return Response(
+        content=f"read={sound}={var_name},{options}",
+        media_type="text/plain; charset=utf-8"
+    )
+
 def registration_record_prompt(text: str, var_name: str, options: str = "no,record,,,no") -> Response:
-    """הקלטת רישום ללא תפריט אישור פנימי של ימות המשיח.
-    כשהודעות מוקלטות מופעלות, מושמע קובץ ההנחיה בלבד ולא מצורף TTS כפול.
-    """
+    """הקלטה ללא תפריט אישור פנימי; קובץ ההנחיה בלבד, ללא TTS כפול."""
     clean_text = clean_tts(text)
     if USE_AUDIO_FILES:
         file_num = get_prompt_file_num(clean_text, var_name)
@@ -1053,12 +1064,12 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         # ---------------------------------------------------------
         elif step == "REG_ID":
             if not user_input or not user_input.isdigit() or not 8 <= len(user_input) <= 9:
-                return yemot_read(
+                return registration_read_prompt(
                     "תעודת הזהות חייבת להכיל שמונה או תשע ספרות. אנא הקישו שוב",
                     "reg_id", "no,9,8,7,Digits,no,no,*/"
                 )
             if user_input in CACHE["users"]:
-                return yemot_read(
+                return registration_read_prompt(
                     "תעודת זהות זו כבר רשומה במערכת. לכניסה לחשבון הקישו 1",
                     "reg_id", "no,9,8,7,Digits,no,no,*/"
                 )
@@ -1072,13 +1083,13 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if user_input == "1":
                 session["reg_data"]["id_number"] = session["reg_data"].get("temp_id_number", "")
                 session["step"] = "REG_PHONE"
-                return yemot_read(
+                return registration_read_prompt(
                     "אנא הקישו מספר טלפון בן תשע או עשר ספרות ולאחר מכן הקישו סולמית",
                     "reg_phone", "no,10,9,7,Digits,no,no,*/"
                 )
             if user_input == "2":
                 session["step"] = "REG_ID"
-                return yemot_read(
+                return registration_read_prompt(
                     "אנא הקישו מחדש את תעודת הזהות ולאחר מכן הקישו סולמית",
                     "reg_id", "no,9,8,7,Digits,no,no,*/"
                 )
@@ -1090,7 +1101,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
 
         elif step == "REG_PHONE":
             if not user_input or not user_input.isdigit() or not 9 <= len(user_input) <= 10:
-                return yemot_read(
+                return registration_read_prompt(
                     "מספר הטלפון חייב להכיל תשע או עשר ספרות. אנא הקישו שוב",
                     "reg_phone", "no,10,9,7,Digits,no,no,*/"
                 )
@@ -1110,7 +1121,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 )
             if user_input == "2":
                 session["step"] = "REG_PHONE"
-                return yemot_read(
+                return registration_read_prompt(
                     "אנא הקישו מחדש את מספר הטלפון ולאחר מכן הקישו סולמית",
                     "reg_phone", "no,10,9,7,Digits,no,no,*/"
                 )
@@ -1211,7 +1222,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if user_input == "1":
                 session["reg_data"]["address"] = session["reg_data"].get("temp_address", "")
                 session["step"] = "REG_COMMUNITY_CODE"
-                return yemot_read(
+                return registration_read_prompt(
                     "אנא הקישו קוד קהילה בן שש ספרות. לדילוג על שלב זה הקישו סולמית",
                     "reg_community_code", "no,6,0,7,Digits,no,no,*/"
                 )
@@ -1237,12 +1248,12 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if not code:
                 session["reg_data"]["community_code"] = ""
                 session["step"] = "REG_ALERTS_CHOICE"
-                return yemot_read(
+                return registration_read_prompt(
                     "לרישום לקבלת צינתוקים אישיים הקישו 1. לדילוג הקישו 2",
                     "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
                 )
             if not code.isdigit() or len(code) != 6:
-                return yemot_read(
+                return registration_read_prompt(
                     "קוד הקהילה חייב להכיל שש ספרות, או הקישו סולמית לדילוג",
                     "reg_community_code", "no,6,0,7,Digits,no,no,*/"
                 )
@@ -1256,13 +1267,13 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if user_input == "1":
                 session["reg_data"]["community_code"] = session["reg_data"].get("temp_community_code", "")
                 session["step"] = "REG_ALERTS_CHOICE"
-                return yemot_read(
+                return registration_read_prompt(
                     "לרישום לקבלת צינתוקים אישיים הקישו 1. לדילוג הקישו 2",
                     "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
                 )
             if user_input == "2":
                 session["step"] = "REG_COMMUNITY_CODE"
-                return yemot_read(
+                return registration_read_prompt(
                     "אנא הקישו מחדש את קוד הקהילה בן שש הספרות, או הקישו סולמית לדילוג",
                     "reg_community_code", "no,6,0,7,Digits,no,no,*/"
                 )
@@ -1282,11 +1293,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
             if user_input == "2":
                 session["registration_alerts_requested"] = False
-                return yemot_read(
+                return registration_read_prompt(
                     "הרישום נשמר. למעבר לתפריט ההזמנות הקישו 1, למעבר לתפריט הראשי הקישו 2",
                     "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
                 )
-            return yemot_read(
+            return registration_read_prompt(
                 "הקשה שגויה. לרישום לקבלת צינתוקים אישיים הקישו 1, לדילוג הקישו 2",
                 "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
             )
@@ -1294,7 +1305,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif step == "REG_FINISH":
             if user_input == "2":
                 session["step"] = "WELCOME"
-                return yemot_read(
+                return registration_read_prompt(
                     welcome_text, "welcome_choice", "no,1,1,7,Digits,no,no,*/"
                 )
             if user_input == "1":
@@ -1304,11 +1315,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 # משתמש חדש מגדיר סיסמה בפעם הראשונה לפני כניסה להזמנות.
                 session["password_setup_target"] = "new_user"
                 session["step"] = "SET_PASSWORD"
-                return yemot_read(
+                return registration_read_prompt(
                     "ליצירת סיסמה לכניסה עתידית, הקישו סיסמה בת שש עד עשר ספרות",
                     "set_password", "no,10,6,7,Digits,no,no,*/"
                 )
-            return yemot_read(
+            return registration_read_prompt(
                 "הרישום נשמר. למעבר לתפריט ההזמנות הקישו 1, למעבר לתפריט הראשי הקישו 2",
                 "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
             )
