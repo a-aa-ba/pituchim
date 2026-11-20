@@ -563,7 +563,7 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
         return "025b"
     if "יש לך הזמנה פתוחה" in text:
         return "026"
-    return PROMPT_FILE_MAP.get(var_name, "001")
+    return PROMPT_FILE_MAP.get(var_name, "")
 
 # -------------------------------------------------------------------
 # פונקציות מענה לימות המשיח
