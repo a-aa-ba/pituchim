@@ -12,8 +12,18 @@
 const SALES_SETTINGS_SHEET = 'הגדרות מכירות';
 const SALES_EXCEPTIONS_SHEET = 'חריגי מכירות';
 
+function getSalesSpreadsheet_() {
+  const spreadsheetId = PropertiesService
+    .getScriptProperties()
+    .getProperty('SPREADSHEET_ID');
+  if (!spreadsheetId) {
+    throw new Error('חסר מאפיין סקריפט בשם SPREADSHEET_ID.');
+  }
+  return SpreadsheetApp.openById(spreadsheetId);
+}
+
 function setupSalesControl() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getSalesSpreadsheet_();
   if (!ss) {
     throw new Error('יש לפתוח את Apps Script מתוך גיליון Google Sheets של המערכת.');
   }
@@ -133,7 +143,7 @@ function doGet(e) {
     return jsonOutput_({ error: 'unauthorized' });
   }
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = getSalesSpreadsheet_();
   const settings = ss.getSheetByName(SALES_SETTINGS_SHEET);
   const exceptionsSheet = ss.getSheetByName(SALES_EXCEPTIONS_SHEET);
 
