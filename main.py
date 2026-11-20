@@ -199,8 +199,8 @@ AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
-YEMOT_TOKEN = "0795322222:123456"
-APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx7Uk7ltg9ZmaLKbh_SBrt1y_dQIMBmPbkhOSA0zEn4Ls77HXgghwGaiLMiln7chcQmfA/exec"
+YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "").strip()
+APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "").strip()
 
 # הגדרות סליקת אשראי (ברירת מחדל: נדרים פלוס, תשלום 1 בלבד)
 CREDIT_CARD_PROVIDER = "nedarim_plus"
@@ -305,7 +305,7 @@ def convert_audio_to_pcm_wav(input_path, output_path):
 # -------------------------------------------------------------------
 def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str:
     print(f"\n=======================================================", flush=True)
-    print(f"LOG [תמלול שמע]: התקבל נתיב להקלטה מימות המשיח: '{my_rec_path}'", flush=True)
+    logger.info("TRANSCRIPTION_RECORDING_REFERENCE_RECEIVED present=%s", bool(my_rec_path))
     print(f"=======================================================", flush=True)
 
     if not my_rec_path or not isinstance(my_rec_path, str):
@@ -473,7 +473,10 @@ def load_data_from_sheets():
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("SERVER_STARTUP_BEGIN")
+    logger.info(
+        "SERVER_STARTUP_BEGIN yemot_token_configured=%s apps_script_configured=%s sales_control_url_configured=%s",
+        bool(YEMOT_TOKEN), bool(APPS_SCRIPT_URL), bool(SALES_CONTROL_URL)
+    )
     load_data_from_sheets()
     sales_loaded = load_sales_control()
     logger.info(
@@ -481,6 +484,25 @@ async def startup_event():
         sales_loaded, SALES_CONTROL_CACHE.get("sales_open"),
         len(CACHE["users"]), len(CACHE["categories"]), len(CACHE["products"])
     )
+    if not YEMOT_TOKEN:
+        logger.error("CONFIG_MISSING YEMOT_TOKEN - recording transcription and Yemot API operations may fail")
+    if not APPS_SCRIPT_URL:
+        logger.error("CONFIG_MISSING APPS_SCRIPT_URL - data loading and sheet logging are disabled")
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "service": "sales-ivr",
+        "yemot_token_configured": bool(YEMOT_TOKEN),
+        "apps_script_configured": bool(APPS_SCRIPT_URL),
+        "sales_control_configured": bool(SALES_CONTROL_URL and SALES_CONTROL_KEY),
+        "sales_control_loaded": bool(SALES_CONTROL_CACHE.get("loaded")),
+        "sales_open": bool(SALES_CONTROL_CACHE.get("sales_open")),
+        "cached_users": len(CACHE.get("users", {})),
+        "cached_categories": len(CACHE.get("categories", [])),
+        "cached_products": len(CACHE.get("products", []))
+    }
 
 @app.get("/refresh-cache")
 async def refresh_cache(request: Request):
@@ -1080,14 +1102,14 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             )
 
         elif step == "REG_NAME":
-            print(f"LOG [REG_NAME]: התקבל נתיב הקלטת שם: '{raw_user_input}'", flush=True)
+            logger.info("REGISTRATION_RECORDING_RECEIVED field=name present=%s", bool(raw_user_input))
             if not raw_user_input:
                 return yemot_read_record(
                     "כעת הקליטו את שמכם המלא לאחר הצליל. לסיום ההקלטה הקישו סולמית",
                     "reg_name", "no,record,,,no"
                 )
             transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
-            print(f"LOG [REG_NAME]: תמלול השם: '{transcribed_text}'", flush=True)
+            logger.info("REGISTRATION_TRANSCRIPTION field=name success=%s length=%s", bool(transcribed_text), len(transcribed_text or ""))
             if not transcribed_text:
                 return yemot_read_record(
                     "לא הצלחנו לתמלל את השם. אנא הקליטו שוב את שמכם המלא לאחר הצליל ולסיום הקישו סולמית",
@@ -1122,14 +1144,14 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             )
 
         elif step == "REG_ADDRESS":
-            print(f"LOG [REG_ADDRESS]: התקבל נתיב הקלטת כתובת: '{raw_user_input}'", flush=True)
+            logger.info("REGISTRATION_RECORDING_RECEIVED field=address present=%s", bool(raw_user_input))
             if not raw_user_input:
                 return yemot_read_record(
                     "כעת הקליטו את הכתובת המלאה, כולל עיר, רחוב ומספר בית, לאחר הצליל. לסיום הקישו סולמית",
                     "reg_address", "no,record,,,no"
                 )
             transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
-            print(f"LOG [REG_ADDRESS]: תמלול הכתובת: '{transcribed_text}'", flush=True)
+            logger.info("REGISTRATION_TRANSCRIPTION field=address success=%s length=%s", bool(transcribed_text), len(transcribed_text or ""))
             if not transcribed_text:
                 return yemot_read_record(
                     "לא הצלחנו לתמלל את הכתובת. אנא הקליטו שוב את הכתובת המלאה לאחר הצליל ולסיום הקישו סולמית",
