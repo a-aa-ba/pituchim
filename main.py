@@ -167,13 +167,18 @@ STEP_PARAM_MAP = {
     "SET_PASSWORD": ["set_password", "ApiRealAnswer"],
     "SET_PASSWORD_CONFIRM": ["set_password_confirm", "ApiRealAnswer"],
     "NOT_AUTHORIZED_CHOICE": ["unauth_choice", "ApiRealAnswer"],
+    "REG_ID": ["reg_id", "ApiRealAnswer"],
+    "REG_ID_CONFIRM": ["reg_id_confirm_choice", "ApiRealAnswer"],
+    "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
+    "REG_PHONE_CONFIRM": ["reg_phone_confirm_choice", "ApiRealAnswer"],
     "REG_NAME": ["reg_name", "my_rec", "ApiRealAnswer"],
     "REG_NAME_CONFIRM": ["reg_name_confirm_choice", "ApiRealAnswer"],
-    "REG_ID": ["reg_id", "ApiRealAnswer"],
-    "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
     "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
     "REG_ADDRESS_CONFIRM": ["reg_address_confirm_choice", "ApiRealAnswer"],
     "REG_COMMUNITY_CODE": ["reg_community_code", "ApiRealAnswer"],
+    "REG_COMMUNITY_CODE_CONFIRM": ["reg_community_code_confirm_choice", "ApiRealAnswer"],
+    "REG_ALERTS_CHOICE": ["reg_alerts_choice", "ApiRealAnswer"],
+    "REG_FINISH": ["reg_finish_choice", "ApiRealAnswer"],
     "PERSONAL_AREA": ["personal_choice", "ApiRealAnswer"],
     "UPDATE_COMMUNITY_CODE": ["new_community_code", "ApiRealAnswer"],
     "RESTORE_CART_CHOICE": ["restore_cart_choice", "ApiRealAnswer"],
@@ -195,9 +200,14 @@ PROMPT_FILE_MAP = {
     "unauth_choice": "004",
     "reg_name": "005",
     "reg_id": "007",
+    "reg_id_confirm_choice": "032",
     "reg_phone": "009",
+    "reg_phone_confirm_choice": "033",
     "reg_address": "010",
     "reg_community_code": "012",
+    "reg_community_code_confirm_choice": "034",
+    "reg_alerts_choice": "035",
+    "reg_finish_choice": "036",
     "personal_choice": "014d",
     "new_community_code": "015",
     "cat_choice": "017b",
@@ -521,25 +531,23 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
 # -------------------------------------------------------------------
 # פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
+def audio_prompt(file_num: str, fallback_text: str) -> str:
+    """קובץ שמע מוקלט בלבד; לא מצרפים TTS אחרי קובץ קיים."""
+    if USE_AUDIO_FILES:
+        return f"f-/{AUDIO_FOLDER}/{file_num}"
+    return f"t-{clean_tts(fallback_text)}"
+
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
-        file_num = get_prompt_file_num(clean_text, var_name)
-        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}.t-{clean_text}"
-    else:
-        sound_str = f"t-{clean_text}"
-        
+    file_num = get_prompt_file_num(clean_text, var_name)
+    sound_str = audio_prompt(file_num, clean_text)
     content = f"read={sound_str}={var_name},{options}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
-def yemot_read_record(text: str, var_name: str, options: str = "no,record", record_folder: str = "") -> Response:
+def yemot_read_record(text: str, var_name: str, options: str = "no,record,,,no", record_folder: str = "") -> Response:
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
-        file_num = get_prompt_file_num(clean_text, var_name)
-        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}.t-{clean_text}"
-    else:
-        sound_str = f"t-{clean_text}"
-        
+    file_num = get_prompt_file_num(clean_text, var_name)
+    sound_str = audio_prompt(file_num, clean_text)
     if record_folder and record_folder != "/":
         content = f"read={sound_str}={var_name},{options},{record_folder}"
     else:
@@ -548,14 +556,47 @@ def yemot_read_record(text: str, var_name: str, options: str = "no,record", reco
 
 def yemot_msg(text: str) -> Response:
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
-        file_num = get_prompt_file_num(clean_text, "")
-        sound_str = f"f-/{AUDIO_FOLDER}/{file_num}.t-{clean_text}"
-    else:
-        sound_str = f"t-{clean_text}"
-        
+    file_num = get_prompt_file_num(clean_text, "")
+    sound_str = audio_prompt(file_num, clean_text)
     content = f"id_list_message={sound_str}"
     return Response(content=content, media_type="text/plain; charset=utf-8")
+
+def yemot_read_digit_confirmation(
+    field_title: str, digits: str, confirm_text: str, var_name: str,
+    intro_file: str, confirm_file: str, options: str
+) -> Response:
+    """משמיע ספרות אחת-אחת בין שני קובצי הנחיה מוקלטים."""
+    if USE_AUDIO_FILES:
+        sound_chain = (
+            f"f-/{AUDIO_FOLDER}/{intro_file}.d-{digits}."
+            f"f-/{AUDIO_FOLDER}/{confirm_file}"
+        )
+    else:
+        sound_chain = f"t-{clean_tts(field_title)}.d-{digits}.t-{clean_tts(confirm_text)}"
+    return Response(
+        content=f"read={sound_chain}={var_name},{options}",
+        media_type="text/plain; charset=utf-8"
+    )
+
+def yemot_read_transcript_confirmation(
+    label: str, transcript: str, var_name: str, intro_file: str, confirm_file: str,
+    retry_text: str
+) -> Response:
+    clean_transcript = clean_tts(transcript)
+    if USE_AUDIO_FILES:
+        sound_chain = (
+            f"f-/{AUDIO_FOLDER}/{intro_file}.t-{clean_transcript}."
+            f"f-/{AUDIO_FOLDER}/{confirm_file}"
+        )
+    else:
+        sound_chain = (
+            f"t-{clean_tts(label)}.t-{clean_transcript}."
+            f"t-{clean_tts(retry_text)}"
+        )
+    return Response(
+        content=f"read={sound_chain}={var_name},no,1,1,7,Digits,no,no,*/",
+        media_type="text/plain; charset=utf-8"
+    )
 
 async def check_abandoned_cart_or_proceed(session: dict, background_tasks: BackgroundTasks) -> Response:
     user = session.get("user", {})
