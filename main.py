@@ -4,6 +4,9 @@ import json
 import hashlib
 import hmac
 import secrets
+import logging
+import time
+import uuid
 import requests
 import subprocess
 import traceback
@@ -16,6 +19,59 @@ import imageio_ffmpeg
 import speech_recognition as sr
 
 app = FastAPI(title="Yemot Sales IVR System")
+
+# לוגים מפורטים ל-Render. לא רושמים סיסמאות, טוקנים, מזהי זהות מלאים או תוכן הקלטות.
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("sales-ivr")
+
+def mask_phone(value: str) -> str:
+    digits = normalize_phone(value)
+    if len(digits) < 6:
+        return "***"
+    return digits[:3] + "****" + digits[-2:]
+
+def safe_value_summary(value: str) -> str:
+    value = str(value or "")
+    if not value:
+        return "empty"
+    if value.isdigit():
+        return f"digits:{len(value)}"
+    return f"text:{len(value)}"
+
+@app.middleware("http")
+async def server_request_logging(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    logger.info(
+        "HTTP_IN request_id=%s method=%s path=%s query_keys=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        sorted(set(request.query_params.keys()))
+    )
+    try:
+        response = await call_next(request)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        logger.info(
+            "HTTP_OUT request_id=%s method=%s path=%s status=%s duration_ms=%s",
+            request_id, request.method, request.url.path,
+            response.status_code, elapsed_ms
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        logger.exception(
+            "HTTP_CRASH request_id=%s method=%s path=%s duration_ms=%s",
+            request_id, request.method, request.url.path, elapsed_ms
+        )
+        raise
 
 # ===================================================================
 # 1. ניהול פתיחה וסגירה של המכירות
@@ -139,7 +195,7 @@ def save_password_hash_to_sales_control(id_number: str, password_hash: str):
 # 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
-AUDIO_FILE_EXISTS_CACHE = {}
+
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
@@ -257,7 +313,8 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
         return ""
 
     active_token = (token or YEMOT_TOKEN or "").strip()
-    print(f"LOG [תמלול שמע]: עושה שימוש בטוקן: '{active_token}'", flush=True)
+    logger.info("TRANSCRIPTION_START recording_path_present=%s token_configured=%s",
+                bool(my_rec_path), bool(active_token))
 
     raw_path = str(my_rec_path).strip()
     clean_path = raw_path.replace("Digits-", "").replace("val_name-", "").strip()
@@ -313,7 +370,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
             
             try:
                 text = recognizer.recognize_google(audio_data, language='he-IL')
-                print(f"=====> תוצאת התמלול שהתקבלה מ-Google: '{text}' <=====", flush=True)
+                logger.info("TRANSCRIPTION_OK characters=%s", len(text or ""))
                 return text.strip() if text else ""
             except sr.UnknownValueError:
                 print("=====> תוצאת התמלול: [לא הצליח לזהות מילים / הקלטה שקטה/לא ברורה] <=====", flush=True)
@@ -323,7 +380,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
                 return ""
 
     except Exception as e:
-        print(f"LOG ERROR בתהליך תמלול השמע: {e}\n{traceback.format_exc()}", flush=True)
+        logger.exception("TRANSCRIPTION_FAILED")
         return ""
     finally:
         if os.path.exists(temp_audio):
@@ -370,6 +427,7 @@ def load_data_from_sheets():
         
     try:
         response = requests.get(APPS_SCRIPT_URL, timeout=10)
+        response.raise_for_status()
         data = response.json()
         
         users_dict = {}
@@ -406,13 +464,23 @@ def load_data_from_sheets():
                     "kashrut": get_field(p, "כשרות", "kashrut")
                 })
         CACHE["products"] = prods
-    except Exception as e:
-        print(f" Error loading data: {e}", flush=True)
+        logger.info(
+            "SHEETS_CACHE_LOADED users=%s categories=%s products=%s",
+            len({k: v for k, v in users_dict.items()}), len(cats), len(prods)
+        )
+    except Exception:
+        logger.exception("SHEETS_CACHE_LOAD_FAILED")
 
 @app.on_event("startup")
 async def startup_event():
+    logger.info("SERVER_STARTUP_BEGIN")
     load_data_from_sheets()
-    load_sales_control()
+    sales_loaded = load_sales_control()
+    logger.info(
+        "SERVER_STARTUP_COMPLETE sales_control_loaded=%s sales_open=%s users=%s categories=%s products=%s",
+        sales_loaded, SALES_CONTROL_CACHE.get("sales_open"),
+        len(CACHE["users"]), len(CACHE["categories"]), len(CACHE["products"])
+    )
 
 @app.get("/refresh-cache")
 async def refresh_cache(request: Request):
@@ -445,8 +513,8 @@ def log_general_event(call_id: str, phone: str, event_type: str, details: str):
             "details": details
         }
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-    except Exception as e:
-        pass
+    except Exception:
+        logger.exception("SHEETS_GENERAL_EVENT_WRITE_FAILED event_type=%s", event_type)
 
 def save_new_user_to_sheet(user_data: dict, password_hash: str = ""):
     """שומר את פרטי הנרשם. סיסמה נשמרת רק אם נמסר hash."""
@@ -533,8 +601,8 @@ def log_transaction_to_sheet(session_data: dict):
             "status": "אומת לפני סליקה"
         }
         requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-    except Exception as e:
-        pass
+    except Exception:
+        logger.exception("SHEETS_TRANSACTION_WRITE_FAILED")
 
 def get_prompt_file_num(text: str, var_name: str) -> str:
     if "סגורה כעת" in text:
@@ -568,39 +636,15 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
 # -------------------------------------------------------------------
 # פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
-def get_audio_file_extension(file_num: str) -> str:
-    """בודק פעם אחת לכל קובץ אם קיימת הקלטת WAV או OGG בשלוחה המוגדרת."""
-    key = str(file_num or "").strip()
-    if not USE_AUDIO_FILES or not key or not YEMOT_TOKEN:
-        return ""
-    if key in AUDIO_FILE_EXISTS_CACHE:
-        return AUDIO_FILE_EXISTS_CACHE[key]
-
-    api_url = "https://www.call2all.co.il/ym/api/CheckIfFileExists"
-    for extension in ("wav", "ogg"):
-        path = f"ivr2:/{AUDIO_FOLDER}/{key}.{extension}"
-        try:
-            response = requests.get(
-                api_url,
-                params={"token": YEMOT_TOKEN, "path": path},
-                timeout=3
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data.get("fileExists") is True:
-                AUDIO_FILE_EXISTS_CACHE[key] = extension
-                return extension
-        except Exception as error:
-            print(f"LOG: בדיקת קובץ שמע {key}.{extension} נכשלה: {error}", flush=True)
-
-    AUDIO_FILE_EXISTS_CACHE[key] = ""
-    return ""
-
 def audio_prompt(file_num: str, fallback_text: str) -> str:
-    """אם יש הקלטה משמיע אותה בלבד; אחרת משתמש ב-TTS כגיבוי."""
-    extension = get_audio_file_extension(file_num)
-    if extension:
-        return f"f-/{AUDIO_FOLDER}/{file_num}.{extension}"
+    """
+    לא מבצעים פנייה חיצונית לימות המשיח בזמן בניית תשובת IVR.
+    אם מוגדר מספר קובץ הקלטה – משמיעים את הקובץ בלבד, ללא TTS אחריו.
+    אם אין מיפוי לקובץ – משתמשים ב-TTS.
+    """
+    file_num = str(file_num or "").strip()
+    if USE_AUDIO_FILES and file_num:
+        return f"f-/{AUDIO_FOLDER}/{file_num}"
     return f"t-{clean_tts(fallback_text)}"
 
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
@@ -677,14 +721,17 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     if request.method == "HEAD":
         return Response(content="OK", media_type="text/plain")
 
+    call_id = "unknown"
+    phone = ""
+    step = "UNKNOWN"
     try:
         params = dict(request.query_params)
         if request.method == "POST":
             form_data = await request.form()
             params.update(dict(form_data))
-            
-        call_id = params.get("ApiCallId") or params.get("phone") or "default_session"
-        phone = params.get("ApiPhone", "").strip()
+
+        call_id = str(params.get("ApiCallId") or params.get("phone") or "default_session")
+        phone = str(params.get("ApiPhone") or "").strip()
         token = params.get("token") or YEMOT_TOKEN
         
         if call_id not in SESSIONS:
@@ -703,24 +750,27 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 "auth_target": "MAIN_MENU"
             }
             background_tasks.add_task(log_general_event, call_id, phone, "כניסה לשיחה", "התחלת שיחה חדשה")
-            
+            logger.info("IVR_SESSION_CREATED call_id=%s phone=%s", call_id, mask_phone(phone))
+
         session = SESSIONS[call_id]
         step = session["step"]
-        
+
         raw_user_input = ""
+        input_key = ""
         expected_keys = STEP_PARAM_MAP.get(step, [])
         for key in expected_keys:
-            if params.get(key):
+            if params.get(key) not in (None, ""):
                 raw_user_input = str(params.get(key)).strip()
+                input_key = key
                 break
-                
-        if not raw_user_input:
-            for k, v in params.items():
-                if not k.startswith("Api") and v:
-                    raw_user_input = str(v).strip()
-                    break
-                    
+
+        # אין fallback שרירותי לכל פרמטר URL: כך token או פרמטר מערכת לא ייחשבו כהקשת המשתמש.
         user_input = clean_input(raw_user_input)
+        logger.info(
+            "IVR_INPUT call_id=%s phone=%s step=%s input_key=%s input_summary=%s param_keys=%s",
+            call_id, mask_phone(phone), step, input_key or "none",
+            safe_value_summary(user_input), sorted(params.keys())
+        )
         welcome_text = "שלום וברוכים הבאים, להודעות ועידכונים הקישו 1, לכניסה למערכת ההזמנות הקישו 2, לרישום למערכת ההזמנות הקישו 3, לאיזור האישי הקישו 4, לשמיעת הקטלוג המלא הקישו 5, לרישום לקבלת צינתוק כשעולה הודעה חדשה הקישו 6"
         
         # ---------------------------------------------------------
@@ -1364,9 +1414,12 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
 
         return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
 
-    except Exception as e:
-        print(f"CRITICAL IVR HANDLER ERROR: {e}\n{traceback.format_exc()}", flush=True)
-        return yemot_read("אירעה שגיאה זמנית בעבודת השרת, אנא נסו שנית", "welcome_choice", "no,1,1,7,Digits,no,no,*/")
+    except Exception:
+        logger.exception(
+            "IVR_HANDLER_FAILED call_id=%s phone=%s step=%s",
+            call_id, mask_phone(phone), step
+        )
+        return yemot_msg("אירעה שגיאה זמנית במערכת. נא לנסות שוב מאוחר יותר.")
 
 def show_personal_area(session: dict, prefix: str = "") -> Response:
     user = session.get("user")
