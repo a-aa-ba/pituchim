@@ -169,7 +169,8 @@ function doGet(e) {
 
   return jsonOutput_({
     sales_open: ['TRUE', '1', 'YES', 'כן'].includes(openValue),
-    exceptions: [...new Set(exceptions)]
+    exceptions: [...new Set(exceptions)],
+    password_hashes: readPasswordHashes_(ss)
   });
 }
 
@@ -187,4 +188,245 @@ function jsonOutput_(data) {
   return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+
+/**
+ * עיצוב מחדש של כל הגיליונות והמרת שמות עמודות לאחידות בעברית.
+ * הפעולה משנה רק את שורת הכותרת ואת העיצוב. ערכי הנתונים בשורות 2 ומטה
+ * אינם נקראים לצורך שינוי ואינם נכתבים מחדש.
+ *
+ * כותרות לא מוכרות באנגלית יוחלפו בשם עברי כללי "עמודה N".
+ * ניתן להוסיף מיפויים ל-HEADER_TRANSLATIONS לפני ההפעלה.
+ */
+const HEADER_TRANSLATIONS = {
+  "id_number": "תעודת זהות",
+  "id": "תעודת זהות",
+  "user_id": "תעודת זהות",
+  "user_identifier": "תעודת זהות",
+  "phone": "מספר טלפון",
+  "caller_phone": "מספר טלפון מחייג",
+  "first_name": "שם פרטי",
+  "last_name": "שם משפחה",
+  "name": "שם לקוח",
+  "user_name": "שם לקוח",
+  "full_name": "שם מלא",
+  "address": "כתובת מלאה",
+  "community_code": "קוד קהילה",
+  "code": "קוד",
+  "community": "קהילה",
+  "active": "פעיל",
+  "is_active": "פעיל",
+  "discount": "אחוז הנחה",
+  "discount_percent": "אחוז הנחה",
+  "category_id": "מזהה קטגוריה",
+  "category_name": "שם קטגוריה",
+  "category": "קטגוריה",
+  "kashruts": "הכשרויות הזמינות",
+  "kashrut": "כשרות",
+  "sku": "מק״ט",
+  "product_id": "מזהה מוצר",
+  "product_name": "שם מוצר",
+  "price": "מחיר ליחידה",
+  "unit_price": "מחיר ליחידה",
+  "category_coupon_price": "מחיר קופון קטגוריה",
+  "notes": "הערות להשמעה",
+  "in_stock": "במלאי",
+  "stock": "מלאי",
+  "transaction_id": "מספר עסקה",
+  "order_id": "מספר הזמנה",
+  "timestamp": "תאריך ושעה",
+  "created_at": "תאריך יצירה",
+  "completed_at": "תאריך סיום",
+  "items_detail": "פירוט המוצרים",
+  "order_details": "פירוט ההזמנה",
+  "total_amount": "סכום לחיוב",
+  "total": "סכום כולל",
+  "quantity": "כמות יחידות",
+  "qty": "כמות יחידות",
+  "status": "סטטוס",
+  "payment_status": "סטטוס תשלום",
+  "payment_reference": "אסמכתת תשלום",
+  "provider_transaction_id": "מספר עסקה אצל הספק",
+  "call_id": "מזהה שיחה",
+  "event_type": "סוג פעולה",
+  "action": "סוג פעולה",
+  "details": "פרטים נוספים",
+  "metric": "מדד",
+  "value": "ערך",
+  "updated_at": "עודכן בתאריך",
+  "password_hash": "סיסמה מוצפנת",
+  "password": "סיסמה מוצפנת",
+  "email": "דואר אלקטרוני",
+  "notes_internal": "הערות פנימיות"
+};
+
+function normalizeHeaderKey_(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\\s\\-]+/g, "_")
+    .replace(/[^\u0590-\u05FFa-z0-9_״"]/g, "");
+}
+
+function formatAllTablesHebrew() {
+  const ss = getSalesSpreadsheet_();
+  const report = [];
+  const sheets = ss.getSheets();
+
+  sheets.forEach(sheet => {
+    const lastColumn = sheet.getLastColumn();
+    const lastRow = sheet.getLastRow();
+    if (lastColumn < 1 || lastRow < 1) {
+      report.push(sheet.getName() + ": דולג (גיליון ריק)");
+      return;
+    }
+
+    // קריאת שורת הכותרת בלבד; אין קריאה/כתיבה של שורות הנתונים.
+    const headerRange = sheet.getRange(1, 1, 1, lastColumn);
+    const oldHeaders = headerRange.getDisplayValues()[0];
+    const newHeaders = oldHeaders.map((header, index) => {
+      const key = normalizeHeaderKey_(header);
+      if (!key) return "עמודה " + (index + 1);
+      if (HEADER_TRANSLATIONS[key]) return HEADER_TRANSLATIONS[key];
+      // כותרת שכבר בעברית נשארת ללא שינוי.
+      if (/[\u0590-\u05FF]/.test(String(header))) return String(header).trim();
+      return "עמודה " + (index + 1);
+    });
+
+    // כתיבה לשורה 1 בלבד.
+    headerRange.setValues([newHeaders]);
+
+    sheet.setRightToLeft(true);
+    sheet.setFrozenRows(1);
+    sheet.setRowHeight(1, 36);
+
+    const fullRange = sheet.getRange(1, 1, Math.max(lastRow, 1), lastColumn);
+    fullRange
+      .setFontFamily("Arial")
+      .setFontSize(10)
+      .setVerticalAlignment("middle")
+      .setWrap(true);
+
+    headerRange
+      .setBackground("#1A73E8")
+      .setFontColor("#FFFFFF")
+      .setFontWeight("bold")
+      .setFontSize(11)
+      .setHorizontalAlignment("center")
+      .setVerticalAlignment("middle");
+
+    // רוחב עמודות לפי שם הכותרת, ללא שינוי בערכים.
+    for (let col = 0; col < newHeaders.length; col++) {
+      const h = newHeaders[col];
+      let width = 150;
+      if (/תעודת זהות|טלפון|מק״ט|קוד/.test(h)) width = 125;
+      if (/שם|קהילה|קטגוריה|מוצר/.test(h)) width = 180;
+      if (/כתובת|הערות|פירוט|פרטים/.test(h)) width = 260;
+      if (/תאריך|שעה/.test(h)) width = 170;
+      sheet.setColumnWidth(col + 1, width);
+    }
+
+    // עיצוב פסים מתחלפים וסינון; אינו משנה את תוכן התאים.
+    sheet.getBandings().forEach(banding => banding.remove());
+    if (lastRow >= 2) {
+      fullRange.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY);
+    }
+    const existingFilter = sheet.getFilter();
+    if (existingFilter) existingFilter.remove();
+    if (lastRow >= 2) fullRange.createFilter();
+
+    report.push(sheet.getName() + ": עוצב, " + lastColumn + " עמודות");
+  });
+
+  SpreadsheetApp.flush();
+  return report.join("\\n");
+}
+
+/**
+ * שומר hash מוצפן לסיסמת משתמש. מתקבל רק מהשרת לאחר בדיקת המפתח.
+ * אם אין עמודת סיסמה מוצפנת, נוסיף אותה בקצה הגיליון ולא נזיז נתונים קיימים.
+ */
+function doPost(e) {
+  let payload;
+  try {
+    payload = JSON.parse((e && e.postData && e.postData.contents) || "{}");
+  } catch (error) {
+    return jsonOutput_({ok: false, error: "invalid_json"});
+  }
+
+  const expectedKey = PropertiesService.getScriptProperties().getProperty("SALES_CONTROL_KEY") || "";
+  if (!expectedKey || String(payload.key || "") !== expectedKey) {
+    return jsonOutput_({ok: false, error: "unauthorized"});
+  }
+
+  if (payload.action !== "set_password") {
+    return jsonOutput_({ok: false, error: "unsupported_action"});
+  }
+
+  const idNumber = String(payload.id_number || "").trim();
+  const passwordHash = String(payload.password_hash || "").trim();
+  if (!/^\\d{8,9}$/.test(idNumber) || !passwordHash.startsWith("pbkdf2_sha256$")) {
+    return jsonOutput_({ok: false, error: "invalid_parameters"});
+  }
+
+  const ss = getSalesSpreadsheet_();
+  const userSheet = findUsersSheet_(ss);
+  if (!userSheet) return jsonOutput_({ok: false, error: "users_sheet_not_found"});
+
+  const lastColumn = Math.max(userSheet.getLastColumn(), 1);
+  const headers = userSheet.getRange(1, 1, 1, lastColumn).getDisplayValues()[0];
+  let idCol = findHeaderColumn_(headers, ["תעודת זהות", "id_number", "user_id", "id"]);
+  if (idCol < 0) return jsonOutput_({ok: false, error: "id_column_not_found"});
+
+  let passwordCol = findHeaderColumn_(headers, ["סיסמה מוצפנת", "password_hash", "password"]);
+  if (passwordCol < 0) {
+    passwordCol = lastColumn + 1;
+    userSheet.getRange(1, passwordCol).setValue("סיסמה מוצפנת");
+  }
+
+  const lastRow = userSheet.getLastRow();
+  if (lastRow < 2) return jsonOutput_({ok: false, error: "user_not_found"});
+
+  const ids = userSheet.getRange(2, idCol + 1, lastRow - 1, 1).getDisplayValues();
+  let targetRow = -1;
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim() === idNumber) {
+      targetRow = i + 2;
+      break;
+    }
+  }
+  if (targetRow < 0) return jsonOutput_({ok: false, error: "user_not_found"});
+
+  userSheet.getRange(targetRow, passwordCol + 1).setNumberFormat("@").setValue(passwordHash);
+  return jsonOutput_({ok: true, id_number: idNumber});
+}
+
+function findUsersSheet_(ss) {
+  return ss.getSheetByName("משתמשים") || ss.getSheetByName("Users") || ss.getSheetByName("users");
+}
+
+function findHeaderColumn_(headers, candidates) {
+  const normalized = headers.map(normalizeHeaderKey_);
+  for (const candidate of candidates) {
+    const index = normalized.indexOf(normalizeHeaderKey_(candidate));
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
+function readPasswordHashes_(ss) {
+  const sheet = findUsersSheet_(ss);
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getLastColumn() < 1) return {};
+  const values = sheet.getDataRange().getDisplayValues();
+  const idCol = findHeaderColumn_(values[0], ["תעודת זהות", "id_number", "user_id", "id"]);
+  const passwordCol = findHeaderColumn_(values[0], ["סיסמה מוצפנת", "password_hash", "password"]);
+  if (idCol < 0 || passwordCol < 0) return {};
+  const hashes = {};
+  for (let row = 1; row < values.length; row++) {
+    const id = String(values[row][idCol] || "").trim();
+    const hash = String(values[row][passwordCol] || "").trim();
+    if (id && hash) hashes[id] = hash;
+  }
+  return hashes;
 }
