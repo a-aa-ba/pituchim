@@ -139,6 +139,7 @@ def save_password_hash_to_sales_control(id_number: str, password_hash: str):
 # 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
+AUDIO_FILE_EXISTS_CACHE = {}
 # ===================================================================
 
 # הגדרות סליקה וטוקן ימות המשיח
@@ -567,10 +568,39 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
 # -------------------------------------------------------------------
 # פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
+def get_audio_file_extension(file_num: str) -> str:
+    """בודק פעם אחת לכל קובץ אם קיימת הקלטת WAV או OGG בשלוחה המוגדרת."""
+    key = str(file_num or "").strip()
+    if not USE_AUDIO_FILES or not key or not YEMOT_TOKEN:
+        return ""
+    if key in AUDIO_FILE_EXISTS_CACHE:
+        return AUDIO_FILE_EXISTS_CACHE[key]
+
+    api_url = "https://www.call2all.co.il/ym/api/CheckIfFileExists"
+    for extension in ("wav", "ogg"):
+        path = f"ivr2:/{AUDIO_FOLDER}/{key}.{extension}"
+        try:
+            response = requests.get(
+                api_url,
+                params={"token": YEMOT_TOKEN, "path": path},
+                timeout=3
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("fileExists") is True:
+                AUDIO_FILE_EXISTS_CACHE[key] = extension
+                return extension
+        except Exception as error:
+            print(f"LOG: בדיקת קובץ שמע {key}.{extension} נכשלה: {error}", flush=True)
+
+    AUDIO_FILE_EXISTS_CACHE[key] = ""
+    return ""
+
 def audio_prompt(file_num: str, fallback_text: str) -> str:
-    """קובץ שמע מוקלט בלבד; לא מצרפים TTS אחרי קובץ קיים."""
-    if USE_AUDIO_FILES:
-        return f"f-/{AUDIO_FOLDER}/{file_num}"
+    """אם יש הקלטה משמיע אותה בלבד; אחרת משתמש ב-TTS כגיבוי."""
+    extension = get_audio_file_extension(file_num)
+    if extension:
+        return f"f-/{AUDIO_FOLDER}/{file_num}.{extension}"
     return f"t-{clean_tts(fallback_text)}"
 
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
@@ -602,13 +632,11 @@ def yemot_read_digit_confirmation(
     intro_file: str, confirm_file: str, options: str
 ) -> Response:
     """משמיע ספרות אחת-אחת בין שני קובצי הנחיה מוקלטים."""
-    if USE_AUDIO_FILES:
-        sound_chain = (
-            f"f-/{AUDIO_FOLDER}/{intro_file}.d-{digits}."
-            f"f-/{AUDIO_FOLDER}/{confirm_file}"
-        )
-    else:
-        sound_chain = f"t-{clean_tts(field_title)}.d-{digits}.t-{clean_tts(confirm_text)}"
+    sound_chain = (
+        f"{audio_prompt(intro_file, field_title)}."
+        f"d-{digits}."
+        f"{audio_prompt(confirm_file, confirm_text)}"
+    )
     return Response(
         content=f"read={sound_chain}={var_name},{options}",
         media_type="text/plain; charset=utf-8"
@@ -619,16 +647,11 @@ def yemot_read_transcript_confirmation(
     retry_text: str
 ) -> Response:
     clean_transcript = clean_tts(transcript)
-    if USE_AUDIO_FILES:
-        sound_chain = (
-            f"f-/{AUDIO_FOLDER}/{intro_file}.t-{clean_transcript}."
-            f"f-/{AUDIO_FOLDER}/{confirm_file}"
-        )
-    else:
-        sound_chain = (
-            f"t-{clean_tts(label)}.t-{clean_transcript}."
-            f"t-{clean_tts(retry_text)}"
-        )
+    sound_chain = (
+        f"{audio_prompt(intro_file, label)}."
+        f"t-{clean_transcript}."
+        f"{audio_prompt(confirm_file, retry_text)}"
+    )
     return Response(
         content=f"read={sound_chain}={var_name},no,1,1,7,Digits,no,no,*/",
         media_type="text/plain; charset=utf-8"
