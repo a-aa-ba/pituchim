@@ -200,72 +200,77 @@ function jsonOutput_(data) {
  * ניתן להוסיף מיפויים ל-HEADER_TRANSLATIONS לפני ההפעלה.
  */
 const HEADER_TRANSLATIONS = {
-  "id_number": "תעודת זהות",
-  "id": "תעודת זהות",
-  "user_id": "תעודת זהות",
-  "user_identifier": "תעודת זהות",
-  "phone": "מספר טלפון",
-  "caller_phone": "מספר טלפון מחייג",
-  "first_name": "שם פרטי",
-  "last_name": "שם משפחה",
-  "name": "שם לקוח",
-  "user_name": "שם לקוח",
-  "full_name": "שם מלא",
-  "address": "כתובת מלאה",
-  "community_code": "קוד קהילה",
-  "code": "קוד",
-  "community": "קהילה",
-  "active": "פעיל",
-  "is_active": "פעיל",
-  "discount": "אחוז הנחה",
-  "discount_percent": "אחוז הנחה",
-  "category_id": "מזהה קטגוריה",
-  "category_name": "שם קטגוריה",
-  "category": "קטגוריה",
-  "kashruts": "הכשרויות הזמינות",
-  "kashrut": "כשרות",
-  "sku": "מק״ט",
-  "product_id": "מזהה מוצר",
-  "product_name": "שם מוצר",
-  "price": "מחיר ליחידה",
+  "id_number": "תעודת זהות", "id": "תעודת זהות", "user_id": "תעודת זהות",
+  "user_identifier": "תעודת זהות", "customer_id": "תעודת זהות",
+  "phone": "מספר טלפון", "phone_number": "מספר טלפון",
+  "caller_phone": "מספר טלפון מחייג", "contact_phone": "מספר טלפון",
+  "first_name": "שם פרטי", "last_name": "שם משפחה",
+  "name": "שם", "user_name": "שם לקוח", "customer_name": "שם לקוח",
+  "full_name": "שם מלא", "address": "כתובת מלאה",
+  "community_code": "קוד קהילה", "code": "קוד",
+  "community": "קהילה", "active": "פעיל", "is_active": "פעיל",
+  "discount": "אחוז הנחה", "discount_percent": "אחוז הנחה",
+  "category_id": "מזהה קטגוריה", "category_name": "שם קטגוריה",
+  "category": "קטגוריה", "kashruts": "הכשרויות הזמינות",
+  "kashrut": "כשרות", "kosher_options": "הכשרויות הזמינות",
+  "sku": "מק״ט", "product_sku": "מק״ט", "product_id": "מזהה מוצר",
+  "product_name": "שם מוצר", "price": "מחיר ליחידה",
   "unit_price": "מחיר ליחידה",
   "category_coupon_price": "מחיר קופון קטגוריה",
-  "notes": "הערות להשמעה",
-  "in_stock": "במלאי",
-  "stock": "מלאי",
-  "transaction_id": "מספר עסקה",
-  "order_id": "מספר הזמנה",
-  "timestamp": "תאריך ושעה",
-  "created_at": "תאריך יצירה",
-  "completed_at": "תאריך סיום",
-  "items_detail": "פירוט המוצרים",
-  "order_details": "פירוט ההזמנה",
-  "total_amount": "סכום לחיוב",
-  "total": "סכום כולל",
-  "quantity": "כמות יחידות",
-  "qty": "כמות יחידות",
-  "status": "סטטוס",
-  "payment_status": "סטטוס תשלום",
+  "coupon_price": "מחיר קופון קטגוריה",
+  "notes": "הערות להשמעה", "product_notes": "הערות להשמעה",
+  "in_stock": "במלאי", "stock": "מלאי",
+  "transaction_id": "מספר עסקה", "order_id": "מספר הזמנה",
+  "timestamp": "תאריך ושעה", "created_at": "תאריך יצירה",
+  "completed_at": "תאריך סיום", "end_time": "שעת סיום",
+  "order_date": "תאריך הזמנה", "order_time": "שעת הזמנה",
+  "items_detail": "פירוט המוצרים", "order_details": "פירוט ההזמנה",
+  "total_amount": "סכום לחיוב", "amount": "סכום לחיוב",
+  "total": "סכום כולל", "quantity": "כמות יחידות", "qty": "כמות יחידות",
+  "status": "סטטוס", "payment_status": "סטטוס תשלום",
   "payment_reference": "אסמכתת תשלום",
   "provider_transaction_id": "מספר עסקה אצל הספק",
-  "call_id": "מזהה שיחה",
-  "event_type": "סוג פעולה",
-  "action": "סוג פעולה",
-  "details": "פרטים נוספים",
-  "metric": "מדד",
-  "value": "ערך",
-  "updated_at": "עודכן בתאריך",
-  "password_hash": "סיסמה מוצפנת",
-  "password": "סיסמה מוצפנת",
-  "email": "דואר אלקטרוני",
-  "notes_internal": "הערות פנימיות"
+  "call_id": "מזהה שיחה", "event_type": "סוג פעולה",
+  "action": "סוג פעולה", "event": "סוג אירוע",
+  "details": "פרטים נוספים", "description": "תיאור",
+  "metric": "מדד", "value": "ערך", "updated_at": "עודכן בתאריך",
+  "password_hash": "סיסמה מוצפנת", "password": "סיסמה מוצפנת",
+  "email": "דואר אלקטרוני", "notes_internal": "הערות פנימיות",
+  "is_paid": "התשלום אומת", "verified_at": "תאריך אימות תשלום",
+  "discount_amount": "סכום ההנחה", "total_price": "סכום כולל",
+  "station_fee": "דמי ניהול תחנה", "manager_reply": "תשובת מנהל"
 };
 
+const SHEET_HEADER_TRANSLATIONS = {
+  "משתמשים": {"name": "שם לקוח", "phone": "מספר טלפון"},
+  "users": {"name": "שם לקוח", "phone": "מספר טלפון"},
+  "קטגוריות": {"name": "שם קטגוריה"},
+  "categories": {"name": "שם קטגוריה"},
+  "מוצרים": {"name": "שם מוצר", "name_product": "שם מוצר"},
+  "products": {"name": "שם מוצר"},
+  "לוח ההזמנות": {"name": "שם לקוח"},
+  "orders": {"name": "שם לקוח"},
+  "לוח המוצרים להזמנה": {"name": "שם מוצר"},
+  "orderitems": {"name": "שם מוצר"},
+  "קודי קהילות": {"name": "קהילה"},
+  "communitycodes": {"name": "קהילה"}
+};
+
+function translateHeader_(sheetName, header, index) {
+  const key = normalizeHeaderKey_(header);
+  const sheetKey = normalizeHeaderKey_(sheetName);
+  const sheetMap = SHEET_HEADER_TRANSLATIONS[sheetName] || SHEET_HEADER_TRANSLATIONS[sheetKey] || {};
+  if (sheetMap[key]) return sheetMap[key];
+  if (HEADER_TRANSLATIONS[key]) return HEADER_TRANSLATIONS[key];
+  if (!key) return "עמודה " + (index + 1);
+  if (/[\u0590-\u05FF]/.test(String(header))) return String(header).trim();
+  return "עמודה " + (index + 1);
+};
 function normalizeHeaderKey_(value) {
   return String(value || "")
     .trim()
     .toLowerCase()
-    .replace(/[\\s\\-]+/g, "_")
+    .replace(/[\s-]+/g, "_")
     .replace(/[^\u0590-\u05FFa-z0-9_״"]/g, "");
 }
 
@@ -285,14 +290,9 @@ function formatAllTablesHebrew() {
     // קריאת שורת הכותרת בלבד; אין קריאה/כתיבה של שורות הנתונים.
     const headerRange = sheet.getRange(1, 1, 1, lastColumn);
     const oldHeaders = headerRange.getDisplayValues()[0];
-    const newHeaders = oldHeaders.map((header, index) => {
-      const key = normalizeHeaderKey_(header);
-      if (!key) return "עמודה " + (index + 1);
-      if (HEADER_TRANSLATIONS[key]) return HEADER_TRANSLATIONS[key];
-      // כותרת שכבר בעברית נשארת ללא שינוי.
-      if (/[\u0590-\u05FF]/.test(String(header))) return String(header).trim();
-      return "עמודה " + (index + 1);
-    });
+    const newHeaders = oldHeaders.map((header, index) =>
+      translateHeader_(sheet.getName(), header, index)
+    );
 
     // כתיבה לשורה 1 בלבד.
     headerRange.setValues([newHeaders]);
@@ -316,15 +316,18 @@ function formatAllTablesHebrew() {
       .setHorizontalAlignment("center")
       .setVerticalAlignment("middle");
 
-    // רוחב עמודות לפי שם הכותרת, ללא שינוי בערכים.
+    // רוחב עמודות ופורמט טקסט למזהים ולטלפונים; עיצוב בלבד, ללא שינוי ערכים.
     for (let col = 0; col < newHeaders.length; col++) {
       const h = newHeaders[col];
       let width = 150;
-      if (/תעודת זהות|טלפון|מק״ט|קוד/.test(h)) width = 125;
-      if (/שם|קהילה|קטגוריה|מוצר/.test(h)) width = 180;
+      if (/תעודת זהות|טלפון|מק״ט|קוד/.test(h)) width = 135;
+      if (/שם|קהילה|קטגוריה|מוצר/.test(h)) width = 185;
       if (/כתובת|הערות|פירוט|פרטים/.test(h)) width = 260;
       if (/תאריך|שעה/.test(h)) width = 170;
       sheet.setColumnWidth(col + 1, width);
+      if (/תעודת זהות|מספר טלפון|מק״ט|קוד קהילה/.test(h) && lastRow >= 2) {
+        sheet.getRange(2, col + 1, lastRow - 1, 1).setNumberFormat("@");
+      }
     }
 
     // עיצוב פסים מתחלפים וסינון; אינו משנה את תוכן התאים.
