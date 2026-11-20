@@ -447,10 +447,11 @@ def log_general_event(call_id: str, phone: str, event_type: str, details: str):
     except Exception as e:
         pass
 
-def save_new_user_to_sheet(user_data: dict, password_hash: str):
+def save_new_user_to_sheet(user_data: dict, password_hash: str = ""):
+    """שומר את פרטי הנרשם. סיסמה נשמרת רק אם נמסר hash."""
     if not APPS_SCRIPT_URL:
         print("LOG ERROR: חסרה כתובת Apps Script לשמירת משתמש", flush=True)
-        return
+        return False
     try:
         payload = {
             "type": "register_user",
@@ -467,10 +468,45 @@ def save_new_user_to_sheet(user_data: dict, password_hash: str):
         )
         res.raise_for_status()
         print(f"LOG: User register sheet response [Code {res.status_code}]", flush=True)
-        if not save_password_hash_to_sales_control(str(user_data.get("id_number", "")), password_hash):
+        if password_hash and not save_password_hash_to_sales_control(str(user_data.get("id_number", "")), password_hash):
             print("LOG ERROR: המשתמש נשמר אך שמירת הסיסמה נכשלה", flush=True)
+            return False
+        return True
     except Exception as e:
         print(f"LOG ERROR registering user: {e}", flush=True)
+        return False
+
+def persist_registration(session: dict, background_tasks: BackgroundTasks) -> dict:
+    """שומר נרשם פעם אחת בזיכרון וב-Sheets, לפני כל ניתוב לשלוחה חיצונית."""
+    data = session.setdefault("reg_data", {})
+    id_number = str(data.get("id_number", "")).strip()
+    phone = str(data.get("phone", "")).strip()
+    user = {
+        "id_number": id_number,
+        "phone": phone,
+        "first_name": str(data.get("first_name", "")).strip(),
+        "last_name": "",
+        "address": str(data.get("address", "")).strip(),
+        "community_code": str(data.get("community_code", "")).strip(),
+        "is_active": "TRUE"
+    }
+    if not session.get("registration_saved"):
+        CACHE["users"][id_number] = user
+        CACHE["users"][phone] = user
+        session["user"] = user
+        session["authenticated_id"] = id_number
+        session["registration_saved"] = True
+        background_tasks.add_task(save_new_user_to_sheet, data, "")
+        background_tasks.add_task(
+            log_general_event,
+            session.get("call_id", ""),
+            session.get("phone", ""),
+            "הרשמה הושלמה",
+            "משתמש חדש נרשם; פרטי רישום נשמרו ללא הגדרת סיסמה"
+        )
+    else:
+        session["user"] = user
+    return user
 
 def log_transaction_to_sheet(session_data: dict):
     if not APPS_SCRIPT_URL:
@@ -683,9 +719,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     
             elif user_input == "3":
                 session["reg_data"] = {}
-                session["password_setup_target"] = "new_user"
-                session["step"] = "REG_NAME"
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
+                session.pop("password_setup_target", None)
+                session.pop("pending_password", None)
+                session["registration_saved"] = False
+                session["step"] = "REG_ID"
+                return yemot_read("להתחלת רישום, אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
                 
             elif user_input == "4":
                 user = session.get("user") or CACHE["users"].get(phone)
@@ -890,122 +928,255 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif step == "NOT_AUTHORIZED_CHOICE":
             if user_input == "1":
                 session["step"] = "AUTH"
+                session["auth_target"] = "MAIN_MENU"
                 return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,9,8,7,Digits,no,no,*/")
             elif user_input == "2":
                 session["reg_data"] = {}
-                session["password_setup_target"] = "new_user"
+                session.pop("password_setup_target", None)
+                session.pop("pending_password", None)
+                session["registration_saved"] = False
+                session["step"] = "REG_ID"
+                return yemot_read("להתחלת רישום, אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+            else:
+                return yemot_read("הקשה שגויה. להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,Digits,no,no,*/")
+
+        # ---------------------------------------------------------
+        # הרשמה חדשה - לפי סדר שבעת השלבים שהוגדר
+        # ---------------------------------------------------------
+        elif step == "REG_ID":
+            if not user_input or not user_input.isdigit() or not 8 <= len(user_input) <= 9:
+                return yemot_read("מספר תעודת הזהות חייב להכיל שמונה או תשע ספרות. אנא הקישו שוב", "reg_id", "no,9,8,7,Digits,no,no,*/")
+            if user_input in CACHE["users"]:
+                session["step"] = "AUTH"
+                session["auth_target"] = "MAIN_MENU"
+                return yemot_read("מספר תעודת הזהות כבר רשום במערכת. לכניסה לחשבון הקישו שוב את מספר תעודת הזהות ולאחר מכן סולמית", "auth_id", "no,9,8,7,Digits,no,no,*/")
+            session["reg_data"]["id_number_temp"] = user_input
+            session["reg_data"]["temp_id_number"] = user_input
+            session["step"] = "REG_ID_CONFIRM"
+            return yemot_read_digit_confirmation(
+                "מספר תעודת הזהות שנקלט הוא", user_input,
+                "לאישור הקישו 1, להקשה מחדש הקישו 2",
+                "reg_id_confirm_choice", "032", "027b",
+                "no,1,1,7,Digits,no,no,*/"
+            )
+
+        elif step == "REG_ID_CONFIRM":
+            if user_input == "1":
+                session["reg_data"]["id_number"] = session["reg_data"].get("temp_id_number", "")
+                session["step"] = "REG_PHONE"
+                return yemot_read("אנא הקישו את מספר הטלפון שלכם, בן תשע או עשר ספרות, ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
+            if user_input == "2":
+                session["step"] = "REG_ID"
+                return yemot_read("אנא הקישו מחדש את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
+            return yemot_read_digit_confirmation(
+                "מספר תעודת הזהות שנקלט הוא",
+                session["reg_data"].get("temp_id_number", ""),
+                "לאישור הקישו 1, להקשה מחדש הקישו 2",
+                "reg_id_confirm_choice", "032", "027b",
+                "no,1,1,7,Digits,no,no,*/"
+            )
+
+        elif step == "REG_PHONE":
+            if not user_input or not user_input.isdigit() or not 9 <= len(user_input) <= 10:
+                return yemot_read("מספר הטלפון חייב להכיל תשע או עשר ספרות. אנא הקישו שוב", "reg_phone", "no,10,9,7,Digits,no,no,*/")
+            session["reg_data"]["temp_phone"] = user_input
+            session["step"] = "REG_PHONE_CONFIRM"
+            return yemot_read_digit_confirmation(
+                "מספר הטלפון שנקלט הוא", user_input,
+                "לאישור הקישו 1, להקשה מחדש הקישו 2",
+                "reg_phone_confirm_choice", "033", "027b",
+                "no,1,1,7,Digits,no,no,*/"
+            )
+
+        elif step == "REG_PHONE_CONFIRM":
+            if user_input == "1":
+                session["reg_data"]["phone"] = session["reg_data"].get("temp_phone", "")
                 session["step"] = "REG_NAME"
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
-            else:
-                return yemot_read("הקשה שגויה, להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+                return yemot_read_record(
+                    "כעת הקליטו את שמכם המלא לאחר הצליל. לסיום ההקלטה הקישו סולמית",
+                    "reg_name", "no,record,,,no"
+                )
+            if user_input == "2":
+                session["step"] = "REG_PHONE"
+                return yemot_read("אנא הקישו מחדש את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
+            return yemot_read_digit_confirmation(
+                "מספר הטלפון שנקלט הוא", session["reg_data"].get("temp_phone", ""),
+                "לאישור הקישו 1, להקשה מחדש הקישו 2",
+                "reg_phone_confirm_choice", "033", "027b",
+                "no,1,1,7,Digits,no,no,*/"
+            )
 
-        # ---------------------------------------------------------
-        # תהליך הרשמה (תמלול ואישור)
-        # ---------------------------------------------------------
         elif step == "REG_NAME":
-            print(f"LOG [REG_NAME]: התקבל קלט להקלטת שם: '{raw_user_input}'", flush=True)
+            print(f"LOG [REG_NAME]: התקבל נתיב הקלטת שם: '{raw_user_input}'", flush=True)
             if not raw_user_input:
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
-            
+                return yemot_read_record(
+                    "כעת הקליטו את שמכם המלא לאחר הצליל. לסיום ההקלטה הקישו סולמית",
+                    "reg_name", "no,record,,,no"
+                )
             transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
-            print(f"LOG [REG_NAME]: תמלול שם שנכנס לשרת: '{transcribed_text}'", flush=True)
-
+            print(f"LOG [REG_NAME]: תמלול השם: '{transcribed_text}'", flush=True)
             if not transcribed_text:
-                return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
-                
-            session["reg_data"]["temp_name"] = transcribed_text
+                return yemot_read_record(
+                    "לא הצלחנו לתמלל את השם. אנא הקליטו שוב את שמכם המלא לאחר הצליל ולסיום הקישו סולמית",
+                    "reg_name", "no,record,,,no"
+                )
+            session["reg_data"]["temp_name"] = transcribed_text.strip()
             session["step"] = "REG_NAME_CONFIRM"
-            
-            clean_name = clean_tts(transcribed_text)
-            if USE_AUDIO_FILES:
-                sound_chain = f"f-/{AUDIO_FOLDER}/027a.t-השם שנקלט הוא.t-{clean_name}.f-/{AUDIO_FOLDER}/027b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-            else:
-                sound_chain = f"t-השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                
-            content = f"read={sound_chain}=reg_name_confirm_choice,no,1,1,7,Digits,no,no,*/"
-            return Response(content=content, media_type="text/plain; charset=utf-8")
+            return yemot_read_transcript_confirmation(
+                "השם שנקלט הוא", session["reg_data"]["temp_name"],
+                "reg_name_confirm_choice", "027a", "027b",
+                "לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            )
 
         elif step == "REG_NAME_CONFIRM":
             if user_input == "1":
                 session["reg_data"]["first_name"] = session["reg_data"].get("temp_name", "")
-                session["step"] = "REG_ID"
-                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
-            elif user_input == "2":
+                session["step"] = "REG_ADDRESS"
+                return yemot_read_record(
+                    "כעת הקליטו את הכתובת המלאה, כולל עיר, רחוב ומספר בית, לאחר הצליל. לסיום הקישו סולמית",
+                    "reg_address", "no,record,,,no"
+                )
+            if user_input == "2":
                 session["step"] = "REG_NAME"
-                return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
-            else:
-                clean_name = clean_tts(session["reg_data"].get("temp_name", ""))
-                if USE_AUDIO_FILES:
-                    sound_chain = f"f-/{AUDIO_FOLDER}/027a.t-הקשה שגויה, השם שנקלט הוא.t-{clean_name}.f-/{AUDIO_FOLDER}/027b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                else:
-                    sound_chain = f"t-הקשה שגויה, השם שנקלט הוא.t-{clean_name}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                content = f"read={sound_chain}=reg_name_confirm_choice,no,1,1,7,Digits,no,no,*/"
-                return Response(content=content, media_type="text/plain; charset=utf-8")
-
-        elif step == "REG_ID":
-            if not user_input:
-                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "reg_id", "no,9,8,7,Digits,no,no,*/")
-            
-            if user_input in CACHE["users"]:
-                return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", "no,9,8,7,Digits,no,no,*/")
-                
-            session["reg_data"]["id_number"] = user_input
-            session["step"] = "REG_PHONE"
-            return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
-
-        elif step == "REG_PHONE":
-            if not user_input:
-                return yemot_read("אנא הקישו את מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "reg_phone", "no,10,9,7,Digits,no,no,*/")
-            session["reg_data"]["phone"] = user_input
-            session["step"] = "REG_ADDRESS"
-            return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
+                return yemot_read_record(
+                    "אנא הקליטו שוב את שמכם המלא לאחר הצליל. לסיום הקישו סולמית",
+                    "reg_name", "no,record,,,no"
+                )
+            return yemot_read_transcript_confirmation(
+                "השם שנקלט הוא", session["reg_data"].get("temp_name", ""),
+                "reg_name_confirm_choice", "027a", "027b",
+                "לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            )
 
         elif step == "REG_ADDRESS":
-            print(f"LOG [REG_ADDRESS]: התקבל קלט להקלטת כתובת: '{raw_user_input}'", flush=True)
+            print(f"LOG [REG_ADDRESS]: התקבל נתיב הקלטת כתובת: '{raw_user_input}'", flush=True)
             if not raw_user_input:
-                return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
-                
+                return yemot_read_record(
+                    "כעת הקליטו את הכתובת המלאה, כולל עיר, רחוב ומספר בית, לאחר הצליל. לסיום הקישו סולמית",
+                    "reg_address", "no,record,,,no"
+                )
             transcribed_text = transcribe_audio_file_from_yemot(raw_user_input, token)
-            print(f"LOG [REG_ADDRESS]: תמלול כתובת שנכנס לשרת: '{transcribed_text}'", flush=True)
-
+            print(f"LOG [REG_ADDRESS]: תמלול הכתובת: '{transcribed_text}'", flush=True)
             if not transcribed_text:
-                return yemot_read_record("לא הצלחנו לפענח את ההקלטה, אנא אמרו שוב בקול ברור את כתובת המגורים ולאחר מכן הקישו סולמית", "reg_address", "no,record")
-
-            session["reg_data"]["temp_address"] = transcribed_text
+                return yemot_read_record(
+                    "לא הצלחנו לתמלל את הכתובת. אנא הקליטו שוב את הכתובת המלאה לאחר הצליל ולסיום הקישו סולמית",
+                    "reg_address", "no,record,,,no"
+                )
+            session["reg_data"]["temp_address"] = transcribed_text.strip()
             session["step"] = "REG_ADDRESS_CONFIRM"
-            
-            clean_addr = clean_tts(transcribed_text)
-            if USE_AUDIO_FILES:
-                sound_chain = f"f-/{AUDIO_FOLDER}/028a.t-הכתובת שנקלטה היא.t-{clean_addr}.f-/{AUDIO_FOLDER}/028b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-            else:
-                sound_chain = f"t-הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                
-            content = f"read={sound_chain}=reg_address_confirm_choice,no,1,1,7,Digits,no,no,*/"
-            return Response(content=content, media_type="text/plain; charset=utf-8")
+            return yemot_read_transcript_confirmation(
+                "הכתובת שנקלטה היא", session["reg_data"]["temp_address"],
+                "reg_address_confirm_choice", "028a", "028b",
+                "לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            )
 
         elif step == "REG_ADDRESS_CONFIRM":
             if user_input == "1":
                 session["reg_data"]["address"] = session["reg_data"].get("temp_address", "")
                 session["step"] = "REG_COMMUNITY_CODE"
-                return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לדילוג הקישו סולמית", "reg_community_code", "no,6,0,7,Digits,no,no,*/")
-            elif user_input == "2":
+                return yemot_read(
+                    "אנא הקישו את קוד הקהילה בן שש הספרות שלכם. לדילוג על שלב זה הקישו סולמית",
+                    "reg_community_code", "no,6,0,7,Digits,no,no,*/"
+                )
+            if user_input == "2":
                 session["step"] = "REG_ADDRESS"
-                return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים המלאה עיר רחוב ומספר בית ולאחר מכן הקישו סולמית", "reg_address", "no,record")
-            else:
-                clean_addr = clean_tts(session["reg_data"].get("temp_address", ""))
-                if USE_AUDIO_FILES:
-                    sound_chain = f"f-/{AUDIO_FOLDER}/028a.t-הקשה שגויה, הכתובת שנקלטה היא.t-{clean_addr}.f-/{AUDIO_FOLDER}/028b.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                else:
-                    sound_chain = f"t-הקשה שגויה, הכתובת שנקלטה היא.t-{clean_addr}.t-לאישור הקישו 1, להקלטה מחדש הקישו 2"
-                content = f"read={sound_chain}=reg_address_confirm_choice,no,1,1,7,Digits,no,no,*/"
-                return Response(content=content, media_type="text/plain; charset=utf-8")
+                return yemot_read_record(
+                    "אנא הקליטו שוב את הכתובת המלאה, כולל עיר, רחוב ומספר בית, לאחר הצליל. לסיום הקישו סולמית",
+                    "reg_address", "no,record,,,no"
+                )
+            return yemot_read_transcript_confirmation(
+                "הכתובת שנקלטה היא", session["reg_data"].get("temp_address", ""),
+                "reg_address_confirm_choice", "028a", "028b",
+                "לאישור הקישו 1, להקלטה מחדש הקישו 2"
+            )
 
         elif step == "REG_COMMUNITY_CODE":
-            community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
-            session["reg_data"]["community_code"] = community_code
-            session["password_setup_target"] = "new_user"
-            session["step"] = "SET_PASSWORD"
-            return yemot_read("ההרשמה כמעט הושלמה. אנא הקישו סיסמה בת שש עד עשר ספרות לכניסה עתידית למערכת", "set_password", "no,10,6,7,Digits,no,no,*/")
+            code = user_input.strip() if user_input and user_input not in ["0", "*", "#"] else ""
+            if not code:
+                session["reg_data"]["community_code"] = ""
+                session["step"] = "REG_ALERTS_CHOICE"
+                return yemot_read(
+                    "לרישום לקבלת צינתוקים אישיים הקישו 1. לדילוג על שלב זה הקישו 2",
+                    "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
+                )
+            if not code.isdigit() or len(code) != 6:
+                return yemot_read(
+                    "קוד הקהילה חייב להכיל שש ספרות. אנא הקישו שוב, או הקישו סולמית לדילוג",
+                    "reg_community_code", "no,6,0,7,Digits,no,no,*/"
+                )
+            session["reg_data"]["temp_community_code"] = code
+            session["step"] = "REG_COMMUNITY_CODE_CONFIRM"
+            return yemot_read_digit_confirmation(
+                "קוד הקהילה שנקלט הוא", code,
+                "לאישור הקישו 1, להקשה מחדש הקישו 2",
+                "reg_community_code_confirm_choice", "034", "027b",
+                "no,1,1,7,Digits,no,no,*/"
+            )
+
+        elif step == "REG_COMMUNITY_CODE_CONFIRM":
+            if user_input == "1":
+                session["reg_data"]["community_code"] = session["reg_data"].get("temp_community_code", "")
+                session["step"] = "REG_ALERTS_CHOICE"
+                return yemot_read(
+                    "לרישום לקבלת צינתוקים אישיים הקישו 1. לדילוג על שלב זה הקישו 2",
+                    "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
+                )
+            if user_input == "2":
+                session["step"] = "REG_COMMUNITY_CODE"
+                return yemot_read(
+                    "אנא הקישו מחדש את קוד הקהילה בן שש הספרות, או הקישו סולמית לדילוג",
+                    "reg_community_code", "no,6,0,7,Digits,no,no,*/"
+                )
+            return yemot_read_digit_confirmation(
+                "קוד הקהילה שנקלט הוא", session["reg_data"].get("temp_community_code", ""),
+                "לאישור הקישו 1, להקשה מחדש הקישו 2",
+                "reg_community_code_confirm_choice", "034", "027b",
+                "no,1,1,7,Digits,no,no,*/"
+            )
+
+        elif step == "REG_ALERTS_CHOICE":
+            persist_registration(session, background_tasks)
+            session["step"] = "REG_FINISH"
+            if user_input == "1":
+                # שלוחה C במערכת הראשית מטפלת בצירוף לרשימת הצינתוקים האישיים.
+                # שלוחת C מוגדרת להשתמש במספר המתקשר כמספר הרשימה.
+                session["registration_alerts_requested"] = True
+                return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
+            if user_input == "2":
+                session["registration_alerts_requested"] = False
+                return yemot_read(
+                    "הרישום נשמר. לסיום ומעבר לתפריט ההזמנות הקישו 1, למעבר לתפריט הראשי הקישו 2",
+                    "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
+                )
+            return yemot_read(
+                "הקשה שגויה. לרישום לקבלת צינתוקים אישיים הקישו 1, לדילוג הקישו 2",
+                "reg_alerts_choice", "no,1,1,7,Digits,no,no,*/"
+            )
+
+        elif step == "REG_FINISH":
+            if user_input == "2":
+                session["step"] = "WELCOME"
+                session["auth_target"] = "MAIN_MENU"
+                session["registration_alerts_requested"] = False
+                return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,Digits,no,no,*/")
+            if user_input == "1":
+                if not is_sales_entry_allowed(session):
+                    return yemot_read(
+                        "הרישום הושלם, אך המכירות סגורות כעת. למעבר לתפריט הראשי הקישו 2",
+                        "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
+                    )
+                session["step"] = "MAIN_MENU"
+                session["user"] = session.get("user") or CACHE["users"].get(session["reg_data"].get("id_number", ""))
+                return await show_categories(session, prefix="הרישום הושלם בהצלחה, ")
+            if not is_sales_entry_allowed(session):
+                return yemot_read(
+                    "הרישום הושלם, אך המכירות סגורות כעת. למעבר לתפריט הראשי הקישו 2",
+                    "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
+                )
+            return yemot_read(
+                "הרישום נשמר. לסיום ומעבר לתפריט ההזמנות הקישו 1, למעבר לתפריט הראשי הקישו 2",
+                "reg_finish_choice", "no,1,1,7,Digits,no,no,*/"
+            )
 
         # ---------------------------------------------------------
         # שלב 2: תפריט קטגוריות
