@@ -19,6 +19,7 @@ app = FastAPI(title="Yemot Sales IVR System")
 # ההגדרות נשמרות בגיליון Google Sheets נפרד ומנוהלות דרך ממשק הגיליון.
 SALES_CONTROL_URL = os.environ.get("SALES_CONTROL_URL", "").strip()
 SALES_CONTROL_KEY = os.environ.get("SALES_CONTROL_KEY", "").strip()
+REFRESH_CACHE_KEY = os.environ.get("REFRESH_CACHE_KEY", "").strip()
 SALES_CONTROL_CACHE = {
     "sales_open": False,
     "exceptions": set(),
@@ -323,15 +324,22 @@ async def startup_event():
     load_sales_control()
 
 @app.get("/refresh-cache")
-async def refresh_cache():
+async def refresh_cache(request: Request):
+    supplied_key = request.headers.get("x-refresh-key", "")
+    if not REFRESH_CACHE_KEY or supplied_key != REFRESH_CACHE_KEY:
+        return Response(content="Forbidden", status_code=403, media_type="text/plain")
+
     load_data_from_sheets()
     sales_control_loaded = load_sales_control()
-    return {
-        "status": "success",
-        "message": "Cache refreshed",
-        "ניהול_מכירות_נטען": sales_control_loaded,
-        "המכירות_פתוחות": SALES_CONTROL_CACHE["sales_open"]
-    }
+    return Response(
+        content=json.dumps({
+            "status": "success",
+            "message": "Cache refreshed",
+            "ניהול_מכירות_נטען": sales_control_loaded,
+            "המכירות_פתוחות": SALES_CONTROL_CACHE["sales_open"]
+        }, ensure_ascii=False),
+        media_type="application/json"
+    )
 
 def log_general_event(call_id: str, phone: str, event_type: str, details: str):
     if not APPS_SCRIPT_URL:
