@@ -221,7 +221,8 @@ def save_password_hash_to_sales_control(id_number: str, password_hash: str) -> b
 def registration_read_prompt(text: str, var_name: str, options: str) -> Response:
     """הנחיות הרישום משתמשות בקובץ המוקלט בלבד כשקובצי שמע מופעלים."""
     clean_text = clean_tts(text)
-    if USE_AUDIO_FILES:
+    # לשני מסרי הבחירה החדשים אין עדיין הקלטות מקוריות שהוגדרו במאגר.
+    if USE_AUDIO_FILES and var_name not in ("reg_alerts_choice", "reg_finish_choice"):
         file_num = get_prompt_file_num(clean_text, var_name)
         sound = f"f-/{AUDIO_FOLDER}/{file_num}"
     else:
