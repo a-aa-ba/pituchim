@@ -53,7 +53,9 @@ function setupSalesControl() {
   );
   exceptions.getRange('A1:C1').setNote('החרגה מאפשרת למספר זה להיכנס להזמנות גם כשהמכירות סגורות. היא אינה פותחת שלוחות אחרות.');
   exceptions.setFrozenRows(1);
-  exceptions.getRange(1, 1, Math.max(2, exceptions.getMaxRows()), 3).createFilterIfNotExists?.();
+  if (!exceptions.getFilter()) {
+    exceptions.getRange(1, 1, Math.max(2, exceptions.getMaxRows()), 3).createFilter();
+  }
   SpreadsheetApp.flush();
   return 'גיליונות ניהול המכירות נוצרו ועוצבו בהצלחה.';
 }
@@ -74,7 +76,8 @@ function styleSalesSheet_(sheet, columns) {
     .setVerticalAlignment('middle')
     .setFontFamily('Arial')
     .setWrap(true);
-  sheet.setAlternatingColors(true);
+  const bandedRange = sheet.getRange(1, 1, Math.max(2, sheet.getMaxRows()), columns);
+  bandedRange.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY);
 }
 
 function doGet(e) {
