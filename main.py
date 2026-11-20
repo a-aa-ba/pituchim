@@ -7,6 +7,8 @@ import secrets
 import logging
 import time
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import subprocess
 import traceback
@@ -195,6 +197,16 @@ def save_password_hash_to_sales_control(id_number: str, password_hash: str):
 # 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
 USE_AUDIO_FILES = True
 AUDIO_FOLDER = "הודעות מערכת"
+AUDIO_FILE_EXISTS_CACHE = {}
+AUDIO_FILE_CACHE_LOCK = threading.Lock()
+AUDIO_PROMPT_FILE_IDS = [
+    "001", "003", "004", "005", "007", "009", "010", "012",
+    "014a", "014b", "014c", "014d", "015", "017a", "017b",
+    "018a", "018b", "018c", "018d", "018e", "018f",
+    "020a", "022a", "022b", "022c", "022d", "022e", "022f", "022g",
+    "023a", "023b", "025a", "025b", "026", "029", "030", "031",
+    "032", "033", "034", "035", "036"
+]
 
 # ===================================================================
 
@@ -479,6 +491,12 @@ async def startup_event():
     )
     load_data_from_sheets()
     sales_loaded = load_sales_control()
+    if USE_AUDIO_FILES and YEMOT_TOKEN:
+        threading.Thread(
+            target=warm_audio_file_cache,
+            name="audio-cache-warmup",
+            daemon=True
+        ).start()
     logger.info(
         "SERVER_STARTUP_COMPLETE sales_control_loaded=%s sales_open=%s users=%s categories=%s products=%s",
         sales_loaded, SALES_CONTROL_CACHE.get("sales_open"),
@@ -658,15 +676,68 @@ def get_prompt_file_num(text: str, var_name: str) -> str:
 # -------------------------------------------------------------------
 # פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
+def _check_audio_file_exists(file_num: str) -> str:
+    """בדיקת קובץ מתבצעת רק בתהליך הרקע של עליית השרת, לא בשיחה."""
+    if not YEMOT_TOKEN:
+        return ""
+    api_url = "https://www.call2all.co.il/ym/api/CheckIfFileExists"
+    for extension in ("wav", "ogg"):
+        path = f"ivr2:/{AUDIO_FOLDER}/{file_num}.{extension}"
+        try:
+            response = requests.get(
+                api_url,
+                params={"token": YEMOT_TOKEN, "path": path},
+                timeout=2.5
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("fileExists") is True:
+                return extension
+        except Exception:
+            logger.exception("AUDIO_FILE_CHECK_FAILED file_id=%s extension=%s", file_num, extension)
+    return ""
+
+def warm_audio_file_cache():
+    """טוען מצב קבצי שמע ברקע, פעם אחת בעת עליית השרת."""
+    if not USE_AUDIO_FILES:
+        return
+    logger.info("AUDIO_CACHE_WARMUP_BEGIN files=%s", len(AUDIO_PROMPT_FILE_IDS))
+    found = 0
+    try:
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            futures = {
+                pool.submit(_check_audio_file_exists, file_id): file_id
+                for file_id in AUDIO_PROMPT_FILE_IDS
+            }
+            for future in as_completed(futures):
+                file_id = futures[future]
+                try:
+                    extension = future.result()
+                except Exception:
+                    logger.exception("AUDIO_CACHE_WORKER_FAILED file_id=%s", file_id)
+                    extension = ""
+                with AUDIO_FILE_CACHE_LOCK:
+                    AUDIO_FILE_EXISTS_CACHE[file_id] = extension
+                if extension:
+                    found += 1
+        logger.info(
+            "AUDIO_CACHE_WARMUP_COMPLETE files=%s found=%s missing=%s",
+            len(AUDIO_PROMPT_FILE_IDS), found, len(AUDIO_PROMPT_FILE_IDS) - found
+        )
+    except Exception:
+        logger.exception("AUDIO_CACHE_WARMUP_FAILED")
+
 def audio_prompt(file_num: str, fallback_text: str) -> str:
     """
-    לא מבצעים פנייה חיצונית לימות המשיח בזמן בניית תשובת IVR.
-    אם מוגדר מספר קובץ הקלטה – משמיעים את הקובץ בלבד, ללא TTS אחריו.
-    אם אין מיפוי לקובץ – משתמשים ב-TTS.
+    ללא פנייה חיצונית בזמן שיחה:
+    קובץ שנמצא במטמון מושמע לבדו; קובץ חסר או שטרם נבדק מקבל TTS.
     """
     file_num = str(file_num or "").strip()
     if USE_AUDIO_FILES and file_num:
-        return f"f-/{AUDIO_FOLDER}/{file_num}"
+        with AUDIO_FILE_CACHE_LOCK:
+            extension = AUDIO_FILE_EXISTS_CACHE.get(file_num)
+        if extension in ("wav", "ogg"):
+            return f"f-/{AUDIO_FOLDER}/{file_num}.{extension}"
     return f"t-{clean_tts(fallback_text)}"
 
 def yemot_read(text: str, var_name: str, options: str = "no,1,1,7,Digits,no,no,*/") -> Response:
@@ -1427,7 +1498,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 part2_text = "שקלים לאישור ומעבר לתשלום הקישו 1 לביטול ההזמנה הקישו 2"
                 
                 if USE_AUDIO_FILES:
-                    sound_chain = f"f-/{AUDIO_FOLDER}/023a.t-{clean_tts(part1_text)}.n-{total_with_fee}.f-/{AUDIO_FOLDER}/023b.t-{clean_tts(part2_text)}"
+                    sound_chain = f"{audio_prompt('023a', part1_text)}.n-{total_with_fee}.{audio_prompt('023b', part2_text)}"
                 else:
                     sound_chain = f"t-{clean_tts(part1_text)}.n-{total_with_fee}.t-{clean_tts(part2_text)}"
 
@@ -1457,10 +1528,10 @@ def show_personal_area(session: dict, prefix: str = "") -> Response:
     
     if USE_AUDIO_FILES:
         sound_chain = (
-            f"f-/{AUDIO_FOLDER}/014a.t-שלום.t-{name}."
-            f"f-/{AUDIO_FOLDER}/014b.t-הכתובת הרשומה במערכת היא.t-{addr}."
-            f"f-/{AUDIO_FOLDER}/014c.t-קוד הקהילה הרשום במערכת הוא.t-{code}."
-            f"f-/{AUDIO_FOLDER}/014d.t-לחזרה לתפריט הראשי הקישו 1, לעדכון קוד הקהילה הקישו 2"
+            f"{audio_prompt('014a', 'שלום')} .t-{name}."
+            f"{audio_prompt('014b', 'הכתובת הרשומה במערכת היא')} .t-{addr}."
+            f"{audio_prompt('014c', 'קוד הקהילה הרשום במערכת הוא')} .t-{code}."
+            f"{audio_prompt('014d', 'לחזרה לתפריט הראשי הקישו 1, לעדכון קוד הקהילה הקישו 2')}"
         )
     else:
         sound_chain = f"t-שלום {name}, הכתובת הרשומה במערכת היא {addr}, קוד הקהילה הרשום במערכת הוא {code}. לחזרה לתפריט הראשי הקישו 1, לעדכון קוד הקהילה הקישו 2"
@@ -1483,7 +1554,7 @@ async def show_categories(session: dict, prefix: str = "") -> Response:
         cats_text += f"ל{c['category_name']} הקישו {i}, "
 
     if USE_AUDIO_FILES:
-        sound_chain = f"f-/{AUDIO_FOLDER}/017a.t-לתפריט ההזמנות.t-{clean_tts(prefix + cats_text)}.f-/{AUDIO_FOLDER}/017b.t-לסיום הקנייה ומעבר לתשלום הקישו 9"
+        sound_chain = f"{audio_prompt('017a', 'לתפריט ההזמנות')}.t-{clean_tts(prefix + cats_text)}.{audio_prompt('017b', 'לסיום הקנייה ומעבר לתשלום הקישו 9')}"
     else:
         sound_chain = f"t-{clean_tts(prefix)} לתפריט ההזמנות: {clean_tts(cats_text)} לסיום הקנייה ומעבר לתשלום הקישו 9"
 
@@ -1522,14 +1593,14 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
 
     if USE_AUDIO_FILES:
         sound_chain = (
-            f"f-/{AUDIO_FOLDER}/022a.t-מוצר.t-{p_name}."
-            f"f-/{AUDIO_FOLDER}/022b.t-מקט.t-{p_sku}."
-            f"f-/{AUDIO_FOLDER}/022c.t-מחיר ליחידה.t-{p_price}."
-            f"f-/{AUDIO_FOLDER}/022d.t-שקלים."
+            f"{audio_prompt('022a', 'מוצר')}.t-{p_name}."
+            f"{audio_prompt('022b', 'מק״ט')}.t-{p_sku}."
+            f"{audio_prompt('022c', 'מחיר ליחידה')}.t-{p_price}."
+            f"{audio_prompt('022d', 'שקלים')}."
         )
         if p_notes:
-            sound_chain += f"f-/{AUDIO_FOLDER}/022e.t-הערה.t-{p_notes}."
-        sound_chain += f"f-/{AUDIO_FOLDER}/022f.t-להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9"
+            sound_chain += f"{audio_prompt('022e', 'הערה')}.t-{p_notes}."
+        sound_chain += f"{audio_prompt('022f', 'להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9')}"
     else:
         notes_str = f" הערה: {p_notes}," if p_notes else ""
         sound_chain = f"t-{clean_tts(prefix)}מוצר: {p_name}, מקט {p_sku}, מחיר ליחידה {p_price} שקלים,{notes_str} להזמנת מוצר זה הקישו 1, להמשך למוצר הבא הקישו 2, למעבר לקטגוריה אחרת הקישו 3, לסיום הקנייה ומעבר לתשלום הקישו 9"
@@ -1551,14 +1622,14 @@ def play_catalog_product(session: dict, prefix: str = "") -> Response:
 
     if USE_AUDIO_FILES:
         sound_chain = (
-            f"f-/{AUDIO_FOLDER}/018a.t-מוצר.t-{p_name}."
-            f"f-/{AUDIO_FOLDER}/018b.t-מקט.t-{p_sku}."
-            f"f-/{AUDIO_FOLDER}/018c.t-מחיר ליחידה.t-{p_price}."
-            f"f-/{AUDIO_FOLDER}/018d.t-שקלים."
+            f"{audio_prompt('018a', 'מוצר')}.t-{p_name}."
+            f"{audio_prompt('018b', 'מק״ט')}.t-{p_sku}."
+            f"{audio_prompt('018c', 'מחיר ליחידה')}.t-{p_price}."
+            f"{audio_prompt('018d', 'שקלים')}."
         )
         if p_notes:
-            sound_chain += f"f-/{AUDIO_FOLDER}/018e.t-הערה.t-{p_notes}."
-        sound_chain += f"f-/{AUDIO_FOLDER}/018f.t-למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2"
+            sound_chain += f"{audio_prompt('018e', 'הערה')}.t-{p_notes}."
+        sound_chain += f"{audio_prompt('018f', 'למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2')}"
     else:
         notes_str = f" הערה: {p_notes}," if p_notes else ""
         sound_chain = f"t-{clean_tts(prefix)}מוצר: {p_name}, מקט {p_sku}, מחיר ליחידה {p_price} שקלים.{notes_str} למוצר הבא הקישו 1, לחזרה לתפריט הראשי הקישו 2"
@@ -1569,7 +1640,7 @@ def play_catalog_product(session: dict, prefix: str = "") -> Response:
 def yemot_read_qty(product_name: str) -> Response:
     p_name = clean_tts(product_name)
     if USE_AUDIO_FILES:
-        sound_chain = f"f-/{AUDIO_FOLDER}/020a.t-הקש את מספר הפריטים שברצונך להזמין ממוצר.t-{p_name}"
+        sound_chain = f"{audio_prompt('020a', 'הקש את מספר הפריטים שברצונך להזמין ממוצר')}.t-{p_name}"
     else:
         sound_chain = f"t-הקש את מספר הפריטים שברצונך להזמין ממוצר {p_name}"
         
@@ -1630,7 +1701,7 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
     part2_text = "שקלים מועברים כעת לסליקת אשראי"
     
     if USE_AUDIO_FILES:
-        msg_chain = f"f-/{AUDIO_FOLDER}/025a.t-{clean_tts(part1_text)}.n-{total_sum}.f-/{AUDIO_FOLDER}/025b.t-{clean_tts(part2_text)}"
+        msg_chain = f"{audio_prompt('025a', part1_text)}.n-{total_sum}.{audio_prompt('025b', part2_text)}"
     else:
         msg_chain = f"t-{clean_tts(part1_text)}.n-{total_sum}.t-{clean_tts(part2_text)}"
     
