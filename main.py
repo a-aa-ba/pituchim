@@ -1,6 +1,9 @@
 import os
 import io
 import json
+import hashlib
+import hmac
+import secrets
 import requests
 import subprocess
 import traceback
@@ -23,6 +26,7 @@ REFRESH_CACHE_KEY = os.environ.get("REFRESH_CACHE_KEY", "").strip()
 SALES_CONTROL_CACHE = {
     "sales_open": False,
     "exceptions": set(),
+    "password_hashes": {},
     "loaded": False
 }
 
@@ -45,11 +49,20 @@ def load_sales_control() -> bool:
         )
         response.raise_for_status()
         data = response.json()
-        if not isinstance(data.get("sales_open"), bool) or not isinstance(data.get("exceptions"), list):
+        if (
+            not isinstance(data.get("sales_open"), bool)
+            or not isinstance(data.get("exceptions"), list)
+            or not isinstance(data.get("password_hashes", {}), dict)
+        ):
             raise ValueError("מבנה נתוני ניהול המכירות אינו תקין")
         SALES_CONTROL_CACHE["sales_open"] = data["sales_open"]
         SALES_CONTROL_CACHE["exceptions"] = {
             normalize_phone(phone) for phone in data["exceptions"] if normalize_phone(phone)
+        }
+        SALES_CONTROL_CACHE["password_hashes"] = {
+            str(user_id).strip(): str(password_hash).strip()
+            for user_id, password_hash in data.get("password_hashes", {}).items()
+            if str(user_id).strip() and str(password_hash).startswith("pbkdf2_sha256$")
         }
         SALES_CONTROL_CACHE["loaded"] = True
         print(
@@ -60,6 +73,67 @@ def load_sales_control() -> bool:
         return True
     except Exception as error:
         print(f"LOG ERROR בטעינת הגדרות המכירות: {error}", flush=True)
+        return False
+
+
+def is_sales_entry_allowed(session: dict) -> bool:
+    """בדיקה מקומית בזיכרון בלבד; אין כאן פנייה ל-Google Sheets."""
+    if SALES_CONTROL_CACHE.get("sales_open", False):
+        return True
+    caller = normalize_phone(session.get("phone", ""))
+    return bool(caller and caller in SALES_CONTROL_CACHE.get("exceptions", set()))
+
+def sales_closed_response() -> Response:
+    return yemot_msg("מערכת ההזמנות סגורה כעת. נא לנסות מאוחר יותר.")
+
+def password_is_valid(password: str) -> bool:
+    return password.isdigit() and 6 <= len(password) <= 10
+
+def hash_user_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    iterations = 310000
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), iterations
+    ).hex()
+    return "pbkdf2_sha256$" + str(iterations) + "$" + salt + "$" + digest
+
+def verify_user_password(password: str, stored_hash: str) -> bool:
+    try:
+        scheme, iterations_text, salt_hex, expected_digest = stored_hash.split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            return False
+        iterations = int(iterations_text)
+        if iterations < 100000 or iterations > 1000000:
+            return False
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), iterations
+        ).hex()
+        return hmac.compare_digest(actual, expected_digest)
+    except (ValueError, TypeError):
+        return False
+
+def save_password_hash_to_sales_control(id_number: str, password_hash: str):
+    if not SALES_CONTROL_URL or not SALES_CONTROL_KEY:
+        print("LOG ERROR: חסרים פרטי חיבור לשמירת סיסמה בגיליון", flush=True)
+        return False
+    try:
+        response = requests.post(
+            SALES_CONTROL_URL,
+            json={
+                "key": SALES_CONTROL_KEY,
+                "action": "set_password",
+                "id_number": str(id_number),
+                "password_hash": str(password_hash)
+            },
+            timeout=15
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("ok"):
+            raise ValueError("Google Sheets rejected password update")
+        return True
+    except Exception as error:
+        print(f"LOG ERROR בשמירת hash סיסמה: {error}", flush=True)
         return False
 
 # 2. שימוש בקובצי שמע מוקלטים (אם קובץ שמע חסר בתיקייה, ישתמש ב-TTS אוטומטית)
@@ -89,6 +163,9 @@ SAVED_CARTS: Dict[str, list] = {}  # שמירת סלי קניות פתוחים �
 STEP_PARAM_MAP = {
     "WELCOME": ["welcome_choice", "ApiRealAnswer"],
     "AUTH": ["auth_id", "ApiRealAnswer"],
+    "AUTH_PASSWORD": ["auth_password", "ApiRealAnswer"],
+    "SET_PASSWORD": ["set_password", "ApiRealAnswer"],
+    "SET_PASSWORD_CONFIRM": ["set_password_confirm", "ApiRealAnswer"],
     "NOT_AUTHORIZED_CHOICE": ["unauth_choice", "ApiRealAnswer"],
     "REG_NAME": ["reg_name", "my_rec", "ApiRealAnswer"],
     "REG_NAME_CONFIRM": ["reg_name_confirm_choice", "ApiRealAnswer"],
@@ -112,6 +189,9 @@ STEP_PARAM_MAP = {
 PROMPT_FILE_MAP = {
     "welcome_choice": "001",
     "auth_id": "003",
+    "auth_password": "029",
+    "set_password": "030",
+    "set_password_confirm": "031",
     "unauth_choice": "004",
     "reg_name": "005",
     "reg_id": "007",
@@ -357,8 +437,9 @@ def log_general_event(call_id: str, phone: str, event_type: str, details: str):
     except Exception as e:
         pass
 
-def save_new_user_to_sheet(user_data: dict):
+def save_new_user_to_sheet(user_data: dict, password_hash: str):
     if not APPS_SCRIPT_URL:
+        print("LOG ERROR: חסרה כתובת Apps Script לשמירת משתמש", flush=True)
         return
     try:
         payload = {
@@ -370,10 +451,16 @@ def save_new_user_to_sheet(user_data: dict):
             "address": str(user_data.get("address", "")),
             "community_code": str(user_data.get("community_code", ""))
         }
-        res = requests.post(APPS_SCRIPT_URL, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=10)
-        print(f" LOG: User register sheet response [Code {res.status_code}]: {res.text}", flush=True)
+        res = requests.post(
+            APPS_SCRIPT_URL, data=json.dumps(payload),
+            headers={"Content-Type": "application/json"}, timeout=15
+        )
+        res.raise_for_status()
+        print(f"LOG: User register sheet response [Code {res.status_code}]", flush=True)
+        if not save_password_hash_to_sales_control(str(user_data.get("id_number", "")), password_hash):
+            print("LOG ERROR: המשתמש נשמר אך שמירת הסיסמה נכשלה", flush=True)
     except Exception as e:
-        print(f" LOG ERROR registering user: {e}", flush=True)
+        print(f"LOG ERROR registering user: {e}", flush=True)
 
 def log_transaction_to_sheet(session_data: dict):
     if not APPS_SCRIPT_URL:
@@ -543,37 +630,19 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if not user_input:
                 return yemot_read(welcome_text, "welcome_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
             
-            # החרגות חלות אך ורק על כניסה להזמנות (שלוחה 2).
-            # רישום, אזור אישי והקטלוג נשארים זמינים גם כשהמכירות סגורות.
-            caller_phone = normalize_phone(phone)
-            is_order_exception = caller_phone in SALES_CONTROL_CACHE["exceptions"]
-
-            if user_input == "2" and (
-                not SALES_CONTROL_CACHE["sales_open"] and not is_order_exception
-            ):
-                clean_closed = clean_tts("מערכת ההזמנות סגורה כעת")
-                clean_welcome = clean_tts(welcome_text)
-                if USE_AUDIO_FILES:
-                    content = f"id_list_message=f-/{AUDIO_FOLDER}/002.t-{clean_closed}&read=f-/{AUDIO_FOLDER}/001.t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
-                else:
-                    content = f"id_list_message=t-{clean_closed}&read=t-{clean_welcome}=welcome_choice,no,1,1,7,Digits,no,no,*/"
-                return Response(content=content, media_type="text/plain; charset=utf-8")
-
             if user_input == "1":
                 return Response(content="go_to_folder=/1", media_type="text/plain; charset=utf-8")
                 
             elif user_input == "2":
-                user = session.get("user") or CACHE["users"].get(phone)
-                if user:
-                    session["user"] = user
-                    background_tasks.add_task(log_general_event, call_id, phone, "זיהוי אוטומטי", f"זוהה לפי טלפון {phone}")
-                    return await check_abandoned_cart_or_proceed(session, background_tasks)
-                else:
-                    session["auth_target"] = "MAIN_MENU"
-                    session["step"] = "AUTH"
-                    return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,yes,no,*/")
+                # קודם מזהים לפי תעודת זהות; רק לאחר מכן תתבקש סיסמה.
+                session["auth_target"] = "MAIN_MENU"
+                session["step"] = "AUTH"
+                session["password_attempts"] = 0
+                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,9,8,7,Digits,no,no,*/")
                     
             elif user_input == "3":
+                session["reg_data"] = {}
+                session["password_setup_target"] = "new_user"
                 session["step"] = "REG_NAME"
                 return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
                 
@@ -668,28 +737,122 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         # שלב 1: זיהוי מורשים
         # ---------------------------------------------------------
         elif step == "AUTH":
+            target = session.get("auth_target", "MAIN_MENU")
             if not user_input:
-                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,9,7,Digits,no,no,*/")
-            
+                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,9,8,7,Digits,no,no,*/")
+
+            if target == "MAIN_MENU" and (not user_input.isdigit() or not 8 <= len(user_input) <= 9):
+                return yemot_read("מספר תעודת הזהות חייב להכיל שמונה או תשע ספרות. אנא הקישו שוב", "auth_id", "no,9,8,7,Digits,no,no,*/")
+
             if user_input in CACHE["users"]:
                 session["user"] = CACHE["users"][user_input]
-                background_tasks.add_task(log_general_event, call_id, phone, "זיהוי מוצלח", f"זוהה לפי {user_input}")
-                
-                target = session.get("auth_target", "MAIN_MENU")
+                session["authenticated_id"] = str(get_field(session["user"], "תעודת זהות", "id_number") or user_input)
+                background_tasks.add_task(log_general_event, call_id, phone, "זיהוי מוצלח", "נמצא משתמש רשום")
+
                 if target == "PERSONAL_AREA":
                     return show_personal_area(session)
-                else:
-                    return await check_abandoned_cart_or_proceed(session, background_tasks)
+
+                stored_hash = SALES_CONTROL_CACHE["password_hashes"].get(session["authenticated_id"])
+                if not stored_hash:
+                    registered_phone = normalize_phone(get_field(session["user"], "מספר טלפון", "phone"))
+                    caller_phone = normalize_phone(phone)
+                    if registered_phone and caller_phone and registered_phone == caller_phone:
+                        session["password_setup_target"] = "legacy_user"
+                        session["step"] = "SET_PASSWORD"
+                        return yemot_read("החשבון נמצא. להגדרת סיסמה ראשונה הקישו סיסמה חדשה בת שש עד עשר ספרות", "set_password", "no,10,6,7,Digits,no,no,*/")
+                    return yemot_msg("החשבון נמצא אך טרם הוגדרה לו סיסמה. נא לפנות למנהל המערכת")
+
+                session["step"] = "AUTH_PASSWORD"
+                session["password_attempts"] = 0
+                return yemot_read("אנא הקישו את הסיסמה שלכם בת שש עד עשר ספרות", "auth_password", "no,10,6,7,Digits,no,no,*/")
+
+            session["step"] = "NOT_AUTHORIZED_CHOICE"
+            background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", "תעודת הזהות אינה רשומה")
+            return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+
+        elif step == "AUTH_PASSWORD":
+            if not user_input:
+                return yemot_read("אנא הקישו את הסיסמה שלכם בת שש עד עשר ספרות", "auth_password", "no,10,6,7,Digits,no,no,*/")
+            if not password_is_valid(user_input):
+                return yemot_read("הסיסמה חייבת להכיל שש עד עשר ספרות. אנא הקישו שוב", "auth_password", "no,10,6,7,Digits,no,no,*/")
+
+            id_number = session.get("authenticated_id", "")
+            stored_hash = SALES_CONTROL_CACHE["password_hashes"].get(id_number, "")
+            if not verify_user_password(user_input, stored_hash):
+                session["password_attempts"] = session.get("password_attempts", 0) + 1
+                if session["password_attempts"] >= 3:
+                    session["step"] = "WELCOME"
+                    session["user"] = None
+                    return yemot_msg("הסיסמה שגויה שלוש פעמים. נא להתקשר מחדש")
+                return yemot_read("הסיסמה שגויה. אנא נסו שוב", "auth_password", "no,10,6,7,Digits,no,no,*/")
+
+            background_tasks.add_task(log_general_event, call_id, phone, "התחברות מוצלחת", "אימות סיסמה הצליח")
+            if not is_sales_entry_allowed(session):
+                session["step"] = "WELCOME"
+                return sales_closed_response()
+            return await check_abandoned_cart_or_proceed(session, background_tasks)
+
+        elif step == "SET_PASSWORD":
+            if not password_is_valid(user_input):
+                return yemot_read("יש להקיש סיסמה בת שש עד עשר ספרות", "set_password", "no,10,6,7,Digits,no,no,*/")
+            session["pending_password"] = user_input
+            session["step"] = "SET_PASSWORD_CONFIRM"
+            return yemot_read("להקשה חוזרת של הסיסמה לאישור, הקישו שוב את אותן שש עד עשר ספרות", "set_password_confirm", "no,10,6,7,Digits,no,no,*/")
+
+        elif step == "SET_PASSWORD_CONFIRM":
+            if not password_is_valid(user_input):
+                return yemot_read("יש להקיש סיסמה בת שש עד עשר ספרות", "set_password_confirm", "no,10,6,7,Digits,no,no,*/")
+            if user_input != session.get("pending_password"):
+                session.pop("pending_password", None)
+                session["step"] = "SET_PASSWORD"
+                return yemot_read("הסיסמאות אינן זהות. אנא הקישו סיסמה חדשה", "set_password", "no,10,6,7,Digits,no,no,*/")
+
+            password_hash = hash_user_password(user_input)
+            target = session.get("password_setup_target", "new_user")
+            id_number = str(
+                session.get("reg_data", {}).get("id_number")
+                if target == "new_user"
+                else session.get("authenticated_id", "")
+            ).strip()
+
+            if target == "new_user":
+                user_info = session["reg_data"]
+                new_user = {
+                    "id_number": user_info.get("id_number"),
+                    "phone": user_info.get("phone"),
+                    "first_name": user_info.get("first_name"),
+                    "last_name": "",
+                    "address": user_info.get("address"),
+                    "community_code": user_info.get("community_code"),
+                    "is_active": "TRUE"
+                }
+                CACHE["users"][id_number] = new_user
+                CACHE["users"][str(user_info.get("phone", ""))] = new_user
+                session["user"] = new_user
+                background_tasks.add_task(save_new_user_to_sheet, user_info, password_hash)
+                background_tasks.add_task(log_general_event, call_id, phone, "הרשמה הושלמה", "משתמש חדש נרשם ונקבעה סיסמה")
             else:
-                session["step"] = "NOT_AUTHORIZED_CHOICE"
-                background_tasks.add_task(log_general_event, call_id, phone, "זיהוי נכשל", f"הוקש {user_input} - לא במורשים")
-                return yemot_read("המערכת מזהה כי אינך רשום למערכת, להקשת מספר אחר הקישו 1, למעבר לרישום למערכת הקישו 2", "unauth_choice", "no,1,1,7,no,no,no,*/,,,,,,no")
+                background_tasks.add_task(save_password_hash_to_sales_control, id_number, password_hash)
+                background_tasks.add_task(log_general_event, call_id, phone, "הוגדרה סיסמה", "סיסמה ראשונה הוגדרה לחשבון קיים")
+
+            SALES_CONTROL_CACHE["password_hashes"][id_number] = password_hash
+            session.pop("pending_password", None)
+            session.pop("password_setup_target", None)
+
+            if not is_sales_entry_allowed(session):
+                session["step"] = "WELCOME"
+                return yemot_msg("הרשמתכם הושלמה בהצלחה. מערכת ההזמנות סגורה כעת. נא לנסות מאוחר יותר.")
+            if target == "new_user":
+                return await show_categories(session, prefix="הרשמתכם הושלמה בהצלחה, ")
+            return await check_abandoned_cart_or_proceed(session, background_tasks)
 
         elif step == "NOT_AUTHORIZED_CHOICE":
             if user_input == "1":
                 session["step"] = "AUTH"
-                return yemot_read("אנא הקישו את מספר תעודת הזהות או מספר הטלפון שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,10,1,7,Digits,no,no,*/")
+                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם ולאחר מכן הקישו סולמית", "auth_id", "no,9,8,7,Digits,no,no,*/")
             elif user_input == "2":
+                session["reg_data"] = {}
+                session["password_setup_target"] = "new_user"
                 session["step"] = "REG_NAME"
                 return yemot_read_record("אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "no,record")
             else:
@@ -799,25 +962,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif step == "REG_COMMUNITY_CODE":
             community_code = user_input if user_input not in ["0", "*", "#", ""] else ""
             session["reg_data"]["community_code"] = community_code
-            
-            user_info = session["reg_data"]
-            new_user = {
-                "id_number": user_info.get("id_number"),
-                "phone": user_info.get("phone"),
-                "first_name": user_info.get("first_name"),
-                "last_name": "",
-                "address": user_info.get("address"),
-                "community_code": user_info.get("community_code"),
-                "is_active": "TRUE"
-            }
-            CACHE["users"][user_info["id_number"]] = new_user
-            CACHE["users"][user_info["phone"]] = new_user
-            session["user"] = new_user
-            
-            background_tasks.add_task(save_new_user_to_sheet, user_info)
-            background_tasks.add_task(log_general_event, call_id, phone, "הרשמה הושלמה", f"נרשם: {user_info.get('first_name')}")
-            
-            return await show_categories(session, prefix="הרשמתכם הושלמה בהצלחה, מועברים לתפריט ההזמנות, ")
+            session["password_setup_target"] = "new_user"
+            session["step"] = "SET_PASSWORD"
+            return yemot_read("ההרשמה כמעט הושלמה. אנא הקישו סיסמה בת שש עד עשר ספרות לכניסה עתידית למערכת", "set_password", "no,10,6,7,Digits,no,no,*/")
 
         # ---------------------------------------------------------
         # שלב 2: תפריט קטגוריות
