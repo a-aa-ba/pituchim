@@ -34,7 +34,7 @@ ALLOWED_PHONES_WHEN_CLOSED = [
 ]
 
 # 2. שימוש בקובצי שמע מוקלטים (אם קובץ חסר, ישתמש ב-TTS אוטומטית)
-USE_AUDIO_FILES = True
+USE_AUDIO_FILES = False
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
