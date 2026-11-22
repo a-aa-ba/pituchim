@@ -39,7 +39,7 @@ AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
 # הגדרות ימות המשיח ו-Google Apps Script
-YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "0795322222:123456")
+YEMOT_TOKEN = os.environ.get("YEMOT_TOKEN", "093136538:112131")
 OTP_YEMOT_TOKEN = os.environ.get("OTP_YEMOT_TOKEN", YEMOT_TOKEN)  # טוקן ממערכת אחרת לשכחתי סיסמא
 OTP_CALLER_ID = os.environ.get("OTP_CALLER_ID", "")
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL")
@@ -252,7 +252,7 @@ def clean_tts(text: str) -> str:
 
 def format_price(val) -> str:
     try:
-        num = float(val)
+        num = float(str(val).replace("₪", "").strip())
         return str(int(num)) if num.is_integer() else f"{num:.2f}"
     except Exception:
         return clean_tts(str(val))
@@ -291,6 +291,25 @@ def get_user_password(user: dict) -> str:
 def is_user_personal_tzintuk(user: dict) -> bool:
     val = str(get_field(user, "צינתוק אישי", "רישום לצינתוק אישי", "personal_tzintuk", "tzintuk", default="FALSE")).upper()
     return val in ["TRUE", "1", "YES", "כן"]
+
+def has_community_discount(user: Optional[dict]) -> bool:
+    """בודק האם המשתמש משויך לקהילה (בעל קוד קהילה תקין)"""
+    if not user:
+        return False
+    code = get_user_community(user)
+    return bool(code and code not in ["0", "לא עודכן", "ללא", "none", "None"])
+
+def get_product_price_for_user(product: dict, user: Optional[dict]) -> str:
+    """מחזיר מחיר קהילה אם למשתמש יש קוד קהילה ולמוצר הוגדר מחיר קהילה, אחרת מחיר רגיל"""
+    regular_price = str(product.get("price", "0")).replace("₪", "").strip()
+    comm_price = str(product.get("community_price", "")).replace("₪", "").strip()
+    if has_community_discount(user) and comm_price:
+        try:
+            float(comm_price)
+            return comm_price
+        except ValueError:
+            pass
+    return regular_price
 
 def sync_user_in_cache(user_obj: dict):
     id_num = str(get_field(user_obj, "תעודת זהות", "ת.ז", "id_number", "id")).strip()
@@ -347,7 +366,8 @@ def load_data_from_sheets():
             if in_stock in ["TRUE", "1", "YES", "כן"]:
                 p_sku = str(get_field(p, "מקט", "מק\"ט", "מזהה מוצר", "מזהה", "sku")).strip()
                 p_name = str(get_field(p, "שם מוצר", "שם המוצר", "שם", "מוצר", "name", "product_name")).strip()
-                p_price = str(get_field(p, "מחיר ליחידה", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
+                p_price = str(get_field(p, "מחיר ליחידה", "מחיר מוצר", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
+                p_community_price = str(get_field(p, "מחיר קהילה", "מחיר לקהילה", "community_price")).strip()
                 p_notes = str(get_field(p, "הערות", "הערה", "notes", "description")).strip()
                 p_cat = str(get_field(p, "קטגוריה", "שם קטגוריה", "category_name", "category")).strip()
                 p_kashrut = str(get_field(p, "כשרות", "כשרויות", "kashrut")).strip()
@@ -356,6 +376,7 @@ def load_data_from_sheets():
                         "sku": p_sku,
                         "name": p_name,
                         "price": p_price,
+                        "community_price": p_community_price,
                         "notes": p_notes,
                         "category_name": p_cat,
                         "kashrut": p_kashrut
@@ -625,7 +646,6 @@ def show_welcome(session: dict, prefix: str = "") -> Response:
 def show_cities_menu(session: dict, target_step: str, var_name: str, prefix: str = "") -> Response:
     cities = CACHE["cities"]
     if not cities:
-        # אם אין ערים מוגדרות בשיטס, מדלג ישירות לכתובת
         if target_step == "REG_CITY":
             session["step"] = "REG_ADDRESS"
             return yemot_read_record("אנא אמרו בקול ברור את כתובת המגורים שלכם, רחוב ומספר בית ללא שם העיר, ולאחר מכן הקישו סולמית", "reg_address", "", "010")
@@ -711,7 +731,8 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
 
     p_name = clean_tts(p["name"])
     p_sku = clean_tts(p["sku"])
-    p_price = format_price(p["price"])
+    effective_price = get_product_price_for_user(p, session.get("user"))
+    p_price = format_price(effective_price)
     p_notes = clean_tts(p["notes"]) if p.get("notes") else ""
 
     if USE_AUDIO_FILES:
@@ -1369,7 +1390,8 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     return yemot_read("כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה", "qty_input", "no,3,1,7,Digits,no,no,*/", "020b")
 
                 p = session["filtered_products"][session["product_index"]]
-                item_total = qty * float(p["price"])
+                effective_price = get_product_price_for_user(p, session.get("user"))
+                item_total = qty * float(effective_price)
                 session["cart"].append({
                     "sku": p["sku"],
                     "name": p["name"],
@@ -1382,7 +1404,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 if user_id:
                     SAVED_CARTS[user_id] = session["cart"]
 
-                background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"{p['name']} x {qty}")
+                background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"{p['name']} x {qty} (מחיר ליח': {effective_price})")
                 cart_total = sum(float(i["total"]) for i in session["cart"])
 
                 session["step"] = "AFTER_ADD_MENU"
