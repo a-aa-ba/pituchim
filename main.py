@@ -1,4 +1,5 @@
 
+
 import os
 import json
 import base64
@@ -59,9 +60,11 @@ CREDIT_CARD_MAX_PAYMENTS = "1"
 CREDIT_CARD_CURRENCY = os.environ.get("CREDIT_CARD_CURRENCY", "1")  # 1 = שקל
 
 PENDING_FILE = "/tmp/pending_tzintuk_returns.json"
+SAVED_CARTS_FILE = "/tmp/saved_carts.json"
 
 CACHE = {
     "users": {},
+    "community_codes": {},  # קוד -> {"name": "...", "owner": "...", "active": True}
     "categories": [],
     "products": [],
     "transactions": [],
@@ -69,11 +72,12 @@ CACHE = {
 }
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
-SAVED_CARTS: Dict[str, list] = {}
+SAVED_CARTS: Dict[str, Dict[str, Any]] = {}
 OTP_PENDING: Dict[str, str] = {}
 PENDING_TZINTUK: Dict[str, Dict[str, Any]] = {}
 
 STEP_PARAM_MAP = {
+    "ENTRY_ABANDONED_CART_CHOICE": ["entry_cart_choice", "ApiRealAnswer"],
     "WELCOME": ["welcome_choice", "ApiRealAnswer"],
     "LOGIN_ID": ["login_id", "ApiRealAnswer"],
     "LOGIN_ID_NOT_FOUND": ["login_not_found_choice", "ApiRealAnswer"],
@@ -149,7 +153,7 @@ PROMPT_FILE_MAP = {
 }
 
 # -------------------------------------------------------------------
-# לוגר מרוכז + שמירת מצב חזרה מצינתוק (/C -> /D)
+# לוגר מרוכז + ניהול סלי קניות וצינתוקים
 # -------------------------------------------------------------------
 def log_step(call_id: str, phone: str, step: str, user_input: str, action: str):
     ts = datetime.now().strftime("%H:%M:%S")
@@ -166,21 +170,86 @@ def get_public_base_url(request: Request) -> str:
         return f"{proto}://{host}"
     return str(request.base_url).rstrip("/")
 
-def _load_pending_file() -> dict:
-    if os.path.exists(PENDING_FILE):
+def _load_json_file(path: str) -> dict:
+    if os.path.exists(path):
         try:
-            with open(PENDING_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
     return {}
 
-def _save_pending_file(data: dict):
+def _save_json_file(path: str, data: dict):
     try:
-        with open(PENDING_FILE, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
     except Exception:
         pass
+
+def save_abandoned_cart(user_id: str, phone: str, cart: list, user: Optional[dict]):
+    if not cart:
+        return
+    record = {
+        "cart": list(cart),
+        "user_id": str(user_id or ""),
+        "phone": str(phone or ""),
+        "user": user,
+        "updated_at": datetime.now().timestamp()
+    }
+    disk = _load_json_file(SAVED_CARTS_FILE)
+    if user_id:
+        SAVED_CARTS[f"uid:{user_id}"] = record
+        disk[f"uid:{user_id}"] = record
+    if phone:
+        SAVED_CARTS[f"ph:{phone}"] = record
+        disk[f"ph:{phone}"] = record
+    user_phone = get_user_phone(user) if user else ""
+    if user_phone and user_phone != phone:
+        SAVED_CARTS[f"ph:{user_phone}"] = record
+        disk[f"ph:{user_phone}"] = record
+    _save_json_file(SAVED_CARTS_FILE, disk)
+
+def get_abandoned_cart(user_id: str = "", phone: str = "") -> Optional[dict]:
+    keys = []
+    if user_id:
+        keys.append(f"uid:{user_id}")
+    if phone:
+        keys.append(f"ph:{phone}")
+
+    for k in keys:
+        rec = SAVED_CARTS.get(k)
+        if rec and rec.get("cart"):
+            return rec
+
+    disk = _load_json_file(SAVED_CARTS_FILE)
+    for k in keys:
+        rec = disk.get(k)
+        if rec and rec.get("cart"):
+            SAVED_CARTS[k] = rec
+            return rec
+    return None
+
+def delete_abandoned_cart(user_id: str = "", phone: str = ""):
+    disk = _load_json_file(SAVED_CARTS_FILE)
+    keys_to_remove = set()
+    if user_id:
+        keys_to_remove.add(f"uid:{user_id}")
+    if phone:
+        keys_to_remove.add(f"ph:{phone}")
+
+    for store in (SAVED_CARTS, disk):
+        for k in list(keys_to_remove):
+            rec = store.get(k)
+            if rec:
+                if rec.get("user_id"):
+                    keys_to_remove.add(f"uid:{rec['user_id']}")
+                if rec.get("phone"):
+                    keys_to_remove.add(f"ph:{rec['phone']}")
+
+    for k in keys_to_remove:
+        SAVED_CARTS.pop(k, None)
+        disk.pop(k, None)
+    _save_json_file(SAVED_CARTS_FILE, disk)
 
 def save_pending_tzintuk(call_id: str, phone: str, return_type: str, session: dict):
     record = {
@@ -190,14 +259,12 @@ def save_pending_tzintuk(call_id: str, phone: str, return_type: str, session: di
         "user": session.get("user"),
         "timestamp": datetime.now().timestamp()
     }
+    disk = _load_json_file(PENDING_FILE)
     if call_id:
         PENDING_TZINTUK[f"cid:{call_id}"] = record
-    if phone:
-        PENDING_TZINTUK[f"ph:{phone}"] = record
-    disk = _load_pending_file()
-    if call_id:
         disk[f"cid:{call_id}"] = record
     if phone:
+        PENDING_TZINTUK[f"ph:{phone}"] = record
         disk[f"ph:{phone}"] = record
     _save_pending_file(disk)
 
@@ -232,7 +299,7 @@ def pop_pending_tzintuk(call_id: str, phone: str) -> Optional[dict]:
     return None
 
 # -------------------------------------------------------------------
-# 1. המרת שמע + הורדה מימות המשיח + תמלול בעברית
+# 1. שמע, תמלול ופילטרים
 # -------------------------------------------------------------------
 def convert_audio_to_pcm_wav(input_path: str, output_path: str) -> bool:
     try:
@@ -312,7 +379,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
                 except: pass
 
 # -------------------------------------------------------------------
-# 2. פונקציות עזר, ניקוי וניהול משתמשים/נתונים מ-Google Sheets
+# 2. עזר, ניקוי, אימות קהילה וניהול נתונים מ-Sheets
 # -------------------------------------------------------------------
 def clean_input(val: str) -> str:
     if not val:
@@ -374,11 +441,32 @@ def is_user_personal_tzintuk(user: dict) -> bool:
     val = str(get_field(user, "צינתוק אישי", "רישום לצינתוק אישי", "personal_tzintuk", "tzintuk", default="FALSE")).upper()
     return val in ["TRUE", "1", "YES", "כן"]
 
+def validate_community_code(code: str) -> tuple[bool, str]:
+    """
+    בודק האם קוד הקהילה קיים ופעיל בלשונית קודי קהילה.
+    מחזיר (האם_תקין, שם_קהילה_או_סיבת_שגיאה)
+    """
+    clean_c = str(code).strip()
+    if not clean_c or clean_c in ["0", "לא עודכן", "ללא", "none", "None"]:
+        return False, "קוד ריק"
+
+    # אם עדיין לא הוגדרו קודים בשיטס, מאפשר קוד בן 6 ספרות
+    if not CACHE["community_codes"]:
+        return (len(clean_c) == 6 and clean_c.isdigit()), "קהילה כללית"
+
+    comm_info = CACHE["community_codes"].get(clean_c) or CACHE["community_codes"].get(clean_c.zfill(6))
+    if not comm_info:
+        return False, "קוד לא קיים במערכת"
+    if not comm_info.get("active", True):
+        return False, "קוד מושבת"
+    return True, comm_info.get("name") or "קהילה מאומתת"
+
 def has_community_discount(user: Optional[dict]) -> bool:
     if not user:
         return False
     code = get_user_community(user)
-    return bool(code and code not in ["0", "לא עודכן", "ללא", "none", "None"])
+    valid, _ = validate_community_code(code)
+    return valid
 
 def get_product_price_for_user(product: dict, user: Optional[dict]) -> str:
     regular_price = str(product.get("price", "0")).replace("₪", "").strip()
@@ -418,6 +506,21 @@ def load_data_from_sheets():
                 if phone:
                     users_dict[phone] = u
         CACHE["users"] = users_dict
+
+        # טעינת קודי קהילה
+        comm_dict = {}
+        for cc in data.get("community_codes", []):
+            code_val = str(get_field(cc, "קוד קהילה", "קוד", "code")).strip()
+            name_val = str(get_field(cc, "שם קהילה", "קהילה", "community_name", "name")).strip()
+            owner_val = str(get_field(cc, "פרטי זיהוי בעל הקוד", "פרטי זיהוי", "איש קשר", "owner")).strip()
+            is_act = str(get_field(cc, "פעיל", "is_active", default="TRUE")).upper() in ["TRUE", "1", "YES", "כן"]
+            if code_val:
+                comm_dict[code_val] = {
+                    "name": name_val,
+                    "owner": owner_val,
+                    "active": is_act
+                }
+        CACHE["community_codes"] = comm_dict
 
         cats = []
         for c in data.get("categories", []):
@@ -476,7 +579,7 @@ def load_data_from_sheets():
             })
         CACHE["transactions"] = txs
 
-        print(f"[CACHE] נטענו: {len(CACHE['users'])} מפתחות משתמש | {len(cats)} קטגוריות | {len(cities)} ערים | {len(prods)} מוצרים | {len(txs)} עסקאות", flush=True)
+        print(f"[CACHE] נטענו: {len(CACHE['users'])} מפתחות משתמש | {len(comm_dict)} קודי קהילה | {len(cats)} קטגוריות | {len(cities)} ערים | {len(prods)} מוצרים | {len(txs)} עסקאות", flush=True)
     except Exception as e:
         print(f"[Sheets ERROR] טעינה נכשלה: {e}", flush=True)
 
@@ -489,6 +592,7 @@ async def refresh_cache():
     load_data_from_sheets()
     return {
         "status": "success",
+        "community_codes_count": len(CACHE["community_codes"]),
         "products_count": len(CACHE["products"]),
         "cities_count": len(CACHE["cities"]),
         "transactions_count": len(CACHE["transactions"])
@@ -545,8 +649,8 @@ def log_transaction_to_sheet(session_data: dict):
     cart = session_data.get("cart", [])
     items_summary = "; ".join([f"{item['name']} מקט {item['sku']} כמות {item['qty']} סך הכל {format_price(item['total'])} שח" for item in cart])
     total_sum = session_data.get("total_sum_with_fee", sum(item['total'] for item in cart) + 10)
-    user_id = get_user_id(user)
-    user_name = get_user_name(user)
+    user_id = get_user_id(user) or session_data.get("phone", "")
+    user_name = get_user_name(user) or "מאזין"
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     tx_record = {
@@ -558,6 +662,30 @@ def log_transaction_to_sheet(session_data: dict):
         "items_detail": items_summary,
         "total_amount": total_sum,
         "status": "הועבר לסליקה"
+    }
+    CACHE["transactions"].append(tx_record)
+    post_to_apps_script(tx_record)
+
+def log_incomplete_transaction_to_sheet(session_data: dict):
+    user = session_data.get("user") or {}
+    cart = session_data.get("cart", [])
+    if not cart:
+        return
+    items_summary = "; ".join([f"{item['name']} מקט {item['sku']} כמות {item['qty']} סך הכל {format_price(item['total'])} שח" for item in cart])
+    cart_sum = sum(float(item["total"]) for item in cart)
+    user_id = get_user_id(user) or session_data.get("phone", "")
+    user_name = get_user_name(user) or "מאזין"
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    tx_record = {
+        "type": "transaction",
+        "transaction_id": str(session_data.get("call_id")),
+        "timestamp": ts,
+        "user_identifier": str(user_id),
+        "user_name": user_name,
+        "items_detail": items_summary,
+        "total_amount": format_price(cart_sum),
+        "status": "לא הושלמה"
     }
     CACHE["transactions"].append(tx_record)
     post_to_apps_script(tx_record)
@@ -711,21 +839,17 @@ def process_gabai_message(rec_path: str, caller_phone: str, user: Optional[dict]
     })
 
 # -------------------------------------------------------------------
-# 4. פונקציות עזר לפורמט read= המדויק של ימות המשיח (15 מיקומים)
+# 4. פונקציות מענה לימות המשיח (15 מיקומים ב-read)
 # -------------------------------------------------------------------
-# מיקום: 1:var_name, 2:no, 3:max, 4:min, 5:sec, 6:play_type, 7:block_star(no=מותר),
-# 8:block_zero(no), 9:replace_char, 10:allowed_keys, 11:attempts, 12:ok_empty, 13:empty_val, 14:lang_lock, 15:ask_ok
 def opts_menu(max_d: int = 1, min_d: int = 1, sec: int = 7, allow_star: bool = True) -> str:
     block_star = "no" if allow_star else "yes"
     return f"no,{max_d},{min_d},{sec},No,{block_star},no,,,,,,,no"
 
 def opts_digits_confirm(max_d: int, min_d: int = 1, sec: int = 7, allow_star: bool = True) -> str:
-    # allow_star=True + min_d=1 מאפשר הקשה על *# לחזרה בכל שדה ספרות
     block_star = "no" if allow_star else "yes"
     return f"no,{max_d},{min_d},{sec},Digits,{block_star},no"
 
 def opts_digits_no_confirm(max_d: int, min_d: int = 1, sec: int = 7, allow_star: bool = True) -> str:
-    # ללא תפריט אישור (מיקום 15 = no), ומאפשר *# לחזרה
     block_star = "no" if allow_star else "yes"
     return f"no,{max_d},{min_d},{sec},Digits,{block_star},no,,,,,,,no"
 
@@ -791,10 +915,12 @@ def show_cities_menu(session: dict, target_step: str, var_name: str, prefix: str
 
 def check_abandoned_cart_or_proceed(session: dict) -> Response:
     user = session.get("user", {})
-    user_id = get_user_id(user) or session.get("phone")
-    if user_id and SAVED_CARTS.get(user_id):
+    user_id = get_user_id(user) or session.get("phone", "")
+    phone = session.get("phone", "")
+    saved = get_abandoned_cart(user_id=user_id, phone=phone)
+    if saved and saved.get("cart"):
         session["step"] = "RESTORE_CART_CHOICE"
-        msg = "המערכת מזהה כי יש לך הזמנה פתוחה במערכת, להמשך קנייה זו הקישו 1, להתחלת קנייה חדשה הקישו 2, לחזרה לתפריט הראשי הקישו כוכבית"
+        msg = "המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא הושלמה. למעבר להמשך ההזמנה הקישו 1, למחיקת ההזמנה הקישו 2"
         return yemot_read(msg, "restore_cart_choice", opts_menu(1, 1, 7, allow_star=True), "026")
     session["step"] = "MAIN_MENU"
     return show_categories(session)
@@ -876,7 +1002,6 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
         )
 
     session["step"] = "PRODUCT_LOOP"
-    # מיקומים מדויקים 1..15: המתנה 5 שניות, כוכבית מותרת, 1 ניסיון, ריק=Ok -> TIMEOUT, ללא אישור
     options = "no,1,1,5,No,no,no,,,1,Ok,TIMEOUT,,no"
     return Response(content=f"read={sound_chain}=product_choice,{options}&rate=3&tts_rate=3", media_type="text/plain; charset=utf-8")
 
@@ -914,8 +1039,8 @@ def finish_checkout(session: dict, background_tasks: BackgroundTasks) -> Respons
 
     user = session.get("user") or {}
     user_id = get_user_id(user) or phone
-    if user_id and user_id in SAVED_CARTS:
-        del SAVED_CARTS[user_id]
+    delete_abandoned_cart(user_id=user_id, phone=phone)
+    session["checkout_completed"] = True
 
     log_step(call_id, phone, "CHECKOUT", "1", f"סליקה בנדרים פלוס בסך {total_str} ש\"ח")
     background_tasks.add_task(log_transaction_to_sheet, dict(session))
@@ -959,8 +1084,10 @@ def show_update_field_step(session: dict, field_step: str, prefix: str = "") -> 
         val = clean_tts(get_user_phone(user)) or "לא עודכן"
         return yemot_read(f"{prefix}טלפון: {val}. לעדכון הקישו 1, להמשך הקישו 2, לחזרה הקישו כוכבית", "upd_phone_choice", opts_menu())
     if field_step == "UPD_COMMUNITY_MENU":
-        val = clean_tts(get_user_community(user)) or "לא עודכן"
-        return yemot_read(f"{prefix}קוד קהילה: {val}. לעדכון הקישו 1, להמשך הקישו 2, לחזרה הקישו כוכבית", "upd_comm_choice", opts_menu())
+        comm_code = get_user_community(user)
+        valid, comm_name = validate_community_code(comm_code)
+        val_desc = f"{comm_code} ({comm_name})" if valid else ("לא מוגדר או מושבת" if comm_code else "לא עודכן")
+        return yemot_read(f"{prefix}קוד קהילה: {val_desc}. לעדכון הקישו 1, להמשך הקישו 2, לחזרה הקישו כוכבית", "upd_comm_choice", opts_menu())
     if field_step == "UPD_PASS_MENU":
         val = clean_tts(get_user_password(user)) or "לא הוגדרה"
         return yemot_read(f"{prefix}סיסמא: {val}. לעדכון הקישו 1, להמשך הקישו 2, לחזרה הקישו כוכבית", "upd_pass_choice", opts_menu())
@@ -1027,7 +1154,7 @@ def start_forgot_password(session: dict, background_tasks: BackgroundTasks) -> R
     return yemot_read(msg, "forgot_otp_input", opts_menu(6, 1, 15, allow_star=True))
 
 # -------------------------------------------------------------------
-# 6. נתיבי ה-Webhook (שלוחה ראשית / ושלוחה /D לחזרה מצינתוק)
+# 6. Webhook ראשי
 # -------------------------------------------------------------------
 @app.api_route("/tzintuk-done", methods=["GET", "POST", "HEAD"])
 async def tzintuk_done_handler(request: Request, background_tasks: BackgroundTasks):
@@ -1053,9 +1180,21 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
         token = params.get("token") or YEMOT_TOKEN
         api_ext = params.get("ApiExtension", "").strip()
 
+        # ---------------------------------------------------------
+        # טיפול בניתוק שיחה + שמירת עסקה שלא הושלמה בשיטס
+        # ---------------------------------------------------------
         if params.get("hangup") == "yes":
             ext_hangup = params.get("ApiHangupExtension", "")
-            log_step(call_id, phone, "HANGUP", "", f"השיחה נותקה בשלוחה {ext_hangup}")
+            sess = SESSIONS.get(call_id)
+            if sess and sess.get("cart") and not sess.get("checkout_completed") and not sess.get("incomplete_logged"):
+                sess["incomplete_logged"] = True
+                u = sess.get("user") or {}
+                uid = get_user_id(u) or phone
+                save_abandoned_cart(uid, phone, sess["cart"], u if u else None)
+                background_tasks.add_task(log_incomplete_transaction_to_sheet, dict(sess))
+                log_step(call_id, phone, "HANGUP", "", f"ניתוק באמצע הזמנה (שלוחה {ext_hangup}) ➔ נשמרה בזיכרון ונרשמה בשיטס בסטטוס 'לא הושלמה'")
+            else:
+                log_step(call_id, phone, "HANGUP", "", f"השיחה נותקה בשלוחה {ext_hangup}")
             return Response(content="ok", media_type="text/plain; charset=utf-8")
 
         if call_id not in SESSIONS:
@@ -1063,6 +1202,9 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 "step": "WELCOME",
                 "user": None,
                 "orders_authenticated": False,
+                "entry_cart_handled": False,
+                "checkout_completed": False,
+                "incomplete_logged": False,
                 "pending_login_user": None,
                 "pending_unauth_id": "",
                 "cart": [],
@@ -1142,9 +1284,61 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
         is_back = (user_input == "*")
 
         # ---------------------------------------------------------
+        # בדיקת עסקה פעילה בכניסה לשיחה
+        # ---------------------------------------------------------
+        if step == "ENTRY_ABANDONED_CART_CHOICE":
+            known_user = CACHE["users"].get(phone) or {}
+            saved = get_abandoned_cart(user_id=get_user_id(known_user), phone=phone)
+
+            if user_input == "1":
+                session["entry_cart_handled"] = True
+                if saved and saved.get("cart"):
+                    session["cart"] = list(saved["cart"])
+                    if saved.get("user"):
+                        session["user"] = saved["user"]
+                    elif known_user:
+                        session["user"] = known_user
+                    session["orders_authenticated"] = True
+                    cart_sum = sum(float(i["total"]) for i in session["cart"])
+                    log_step(call_id, phone, step, "1", f"המשך הזמנה פעילה מכניסה (סכום {format_price(cart_sum)} ש\"ח) ➔ קטגוריות")
+                    return show_categories(session, prefix=f"סכום ההזמנה הנוכחי עומד על {format_price(cart_sum)} שקלים. ")
+                return show_welcome(session, prefix="לא נמצאה הזמנה פעילה, ")
+
+            elif user_input == "2":
+                session["entry_cart_handled"] = True
+                log_step(call_id, phone, step, "2", "שמירת ההזמנה בהמתנה עד לכניסה להזמנות ➔ תפריט ראשי")
+                return show_welcome(session, prefix="ההזמנה נשמרה בהמתנה עד לכניסה למערכת ההזמנות. ")
+
+            elif user_input == "3":
+                session["entry_cart_handled"] = True
+                session["cart"] = []
+                delete_abandoned_cart(user_id=get_user_id(known_user), phone=phone)
+                log_step(call_id, phone, step, "3", "מחיקת הזמנה מהזיכרון ➔ תפריט ראשי")
+                return show_welcome(session, prefix="ההזמנה נמחקה. ")
+
+            else:
+                msg = (
+                    "הקשה שגויה. המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא שולמה. "
+                    "למעבר להמשך ההזמנה הקישו 1, לשמירת ההזמנה במצב המתנה עד לכניסה הבאה למערכת ההזמנות הקישו 2, למחיקת ההזמנה הקישו 3"
+                )
+                return yemot_read(msg, "entry_cart_choice", opts_menu(1, 1, 7, allow_star=False))
+
+        # ---------------------------------------------------------
         # תפריט ראשי
         # ---------------------------------------------------------
         if step == "WELCOME":
+            if not user_input and not session.get("entry_cart_handled"):
+                known_user = CACHE["users"].get(phone) or {}
+                saved_entry = get_abandoned_cart(user_id=get_user_id(known_user), phone=phone)
+                if saved_entry and saved_entry.get("cart"):
+                    session["step"] = "ENTRY_ABANDONED_CART_CHOICE"
+                    log_step(call_id, phone, "WELCOME", "", "זוהתה עסקה פעילה שלא שולמה בכניסה ➔ שאלת המשך/המתנה/מחיקה")
+                    msg = (
+                        "המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא שולמה. "
+                        "למעבר להמשך ההזמנה הקישו 1, לשמירת ההזמנה במצב המתנה עד לכניסה הבאה למערכת ההזמנות הקישו 2, למחיקת ההזמנה הקישו 3"
+                    )
+                    return yemot_read(msg, "entry_cart_choice", opts_menu(1, 1, 7, allow_star=False))
+
             if not user_input or is_back:
                 log_step(call_id, phone, step, user_input, "השמעת תפריט ראשי")
                 return show_welcome(session)
@@ -1228,13 +1422,9 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 return yemot_read("מספר תעודת הזהות אינו מזוהה במערכת. להקשת מספר אחר הקישו 1, למעבר לרישום הקישו 2, לחזרה לתפריט הראשי הקישו כוכבית", "login_not_found_choice", opts_menu())
 
         elif step == "LOGIN_ID_NOT_FOUND":
-            if is_back:
+            if is_back or user_input == "1":
                 session["step"] = "LOGIN_ID"
-                log_step(call_id, phone, step, "*", "חזרה להקשת ת.ז")
-                return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם בן 8 עד 9 ספרות ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
-            if user_input == "1":
-                session["step"] = "LOGIN_ID"
-                log_step(call_id, phone, step, "1", "חזרה להקשת ת.ז אחרת")
+                log_step(call_id, phone, step, user_input, "חזרה להקשת ת.ז")
                 return yemot_read("אנא הקישו את מספר תעודת הזהות שלכם בן 8 עד 9 ספרות ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
             elif user_input == "2":
                 target = session.get("auth_target", "MAIN_MENU")
@@ -1332,7 +1522,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 return show_update_field_step(session, "UPD_NAME_MENU", prefix="הסיסמא עודכנה בהצלחה, ")
             elif target == "TX_HISTORY":
                 return show_tx_history_list(session, prefix="הסיסמא עודכנה בהצלחה, ")
-            return show_categories(session, prefix="הסיסמא עודכנה בהצלחה, ")
+            return check_abandoned_cart_or_proceed(session)
 
         # ---------------------------------------------------------
         # תהליך רישום
@@ -1495,12 +1685,14 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             if is_back:
                 session["step"] = "REG_COMMUNITY_CHOICE"
                 return yemot_read("להקשת קוד קהילה הקישו 1, לדילוג הקישו 2, לחזרה הקישו כוכבית", "reg_community_choice", opts_menu())
-            if not user_input or len(user_input) != 6 or not user_input.isdigit():
-                log_step(call_id, phone, step, user_input, "קוד קהילה לא תקין (נדרשות 6 ספרות)")
-                return yemot_read("קוד קהילה חייב להיות בן 6 ספרות. אנא הקישו שוב ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "reg_community_code", opts_digits_confirm(6, 1, 7, allow_star=True), "012")
+
+            is_valid_code, comm_name_or_err = validate_community_code(user_input)
+            if not is_valid_code or len(user_input) != 6 or not user_input.isdigit():
+                log_step(call_id, phone, step, user_input, f"קוד קהילה לא תקין/מושבת ({comm_name_or_err})")
+                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב קוד בן 6 ספרות ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "reg_community_code", opts_digits_confirm(6, 1, 7, allow_star=True), "012")
 
             session["reg_data"]["community_code"] = user_input
-            log_step(call_id, phone, step, user_input, "קוד קהילה נקלט ➔ מעבר לשלוחה /C")
+            log_step(call_id, phone, step, user_input, f"קוד קהילה אומת בהצלחה ({comm_name_or_err}) ➔ מעבר לשלוחה /C")
             return redirect_to_tzintuk_c(session, call_id, phone, "REG", request)
 
         elif step == "REG_PASSWORD":
@@ -1529,7 +1721,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             session["user"] = new_user
             session["orders_authenticated"] = True
             background_tasks.add_task(save_new_user_to_sheet, dict(new_user))
-            background_tasks.add_task(log_general_event, call_id, phone, "הרשמה הושלמה", f"נרשם: {new_user['first_name']} | עיר: {new_user['city']} | צינתוק: {new_user['personal_tzintuk']}")
+            background_tasks.add_task(log_general_event, call_id, phone, "הרשמה הושלמה", f"נרשם: {new_user['first_name']} | עיר: {new_user['city']} | קהילה: {new_user['community_code']}")
 
             log_step(call_id, phone, step, "******", f"משתמש חדש נשמר ({new_user['id_number']}) ➔ תפריט סיום הרשמה")
             ret = session.get("reg_return_to", "MAIN_MENU")
@@ -1549,7 +1741,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             return yemot_read("הקשה שגויה. למעבר לתפריט ההזמנות הקישו 1, לחזרה לתפריט הראשי הקישו 2", "reg_end_choice", opts_menu(), "013")
 
         # ---------------------------------------------------------
-        # שחזור סל פתוח + תפריט ההזמנות (כוכבית = חזרה לתפריט קודם)
+        # שחזור סל פתוח בשלוחה 2 (אחרי זיהוי + סיסמא)
         # ---------------------------------------------------------
         elif step == "RESTORE_CART_CHOICE":
             if is_back:
@@ -1558,17 +1750,19 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             user = session.get("user") or {}
             user_id = get_user_id(user) or phone
             if user_input == "1":
-                session["cart"] = SAVED_CARTS.get(user_id, [])
-                log_step(call_id, phone, step, "1", "שחזור סל פתוח")
-                return show_categories(session, prefix="ממשיכים את ההזמנה הקודמת, ")
+                saved = get_abandoned_cart(user_id=user_id, phone=phone)
+                session["cart"] = list(saved["cart"]) if saved and saved.get("cart") else []
+                cart_sum = sum(float(i["total"]) for i in session["cart"])
+                log_step(call_id, phone, step, "1", f"המשך הזמנה פעילה (סכום {format_price(cart_sum)} ש\"ח)")
+                return show_categories(session, prefix=f"סכום ההזמנה הנוכחי עומד על {format_price(cart_sum)} שקלים. ")
             elif user_input == "2":
                 session["cart"] = []
-                if user_id in SAVED_CARTS:
-                    del SAVED_CARTS[user_id]
-                log_step(call_id, phone, step, "2", "איפוס סל והתחלת קנייה חדשה")
-                return show_categories(session, prefix="מתחילים הזמנה חדשה, ")
+                delete_abandoned_cart(user_id=user_id, phone=phone)
+                log_step(call_id, phone, step, "2", "מחיקת הזמנה פעילה והתחלת תפריט הזמנות נקי")
+                return show_categories(session, prefix="ההזמנה נמחקה, ")
             else:
-                return yemot_read("הקשה שגויה, להמשך קנייה קודמת הקישו 1, לקנייה חדשה הקישו 2, לחזרה הקישו כוכבית", "restore_cart_choice", opts_menu(), "026")
+                msg = "הקשה שגויה. המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא הושלמה. למעבר להמשך ההזמנה הקישו 1, למחיקת ההזמנה הקישו 2, לחזרה הקישו כוכבית"
+                return yemot_read(msg, "restore_cart_choice", opts_menu(), "026")
 
         elif step == "MAIN_MENU":
             if is_back:
@@ -1714,8 +1908,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
                 user = session.get("user") or {}
                 user_id = get_user_id(user) or phone
-                if user_id:
-                    SAVED_CARTS[user_id] = session["cart"]
+                save_abandoned_cart(user_id, phone, session["cart"], user if user else None)
 
                 log_step(call_id, phone, step, str(qty), f"נוסף לסל: {p['name']} x{qty} (מחיר יח': {effective_price}, סה\"כ: {format_price(item_total)})")
                 background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"{p['name']} x {qty} (מחיר ליח': {effective_price})")
@@ -1759,8 +1952,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 session["cart"] = []
                 user = session.get("user") or {}
                 user_id = get_user_id(user) or phone
-                if user_id and user_id in SAVED_CARTS:
-                    del SAVED_CARTS[user_id]
+                delete_abandoned_cart(user_id=user_id, phone=phone)
                 log_step(call_id, phone, step, "2", "הזמנה בוטלה והסל נוקה")
                 return show_categories(session, prefix="ההזמנה בוטלה, ")
             else:
@@ -1936,15 +2128,18 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
         elif step == "UPD_COMMUNITY_INPUT":
             if is_back:
                 return show_update_field_step(session, "UPD_COMMUNITY_MENU")
-            if not user_input or len(user_input) != 6 or not user_input.isdigit():
-                return yemot_read("קוד קהילה חייב להיות בן 6 ספרות, אנא הקישו שנית ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "upd_comm_input", opts_digits_confirm(6, 1, 7, allow_star=True), "015")
+
+            is_valid_code, comm_name_or_err = validate_community_code(user_input)
+            if not is_valid_code or len(user_input) != 6 or not user_input.isdigit():
+                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב קוד בן 6 ספרות ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(6, 1, 7, allow_star=True), "015")
+
             user = session["user"]
             user["community_code"] = user_input
             user["קוד קהילה"] = user_input
             sync_user_in_cache(user)
             background_tasks.add_task(update_user_in_sheet, dict(user))
-            log_step(call_id, phone, step, user_input, "קוד קהילה עודכן")
-            return show_update_field_step(session, "UPD_PASS_MENU", prefix="קוד הקהילה עודכן בהצלחה, ")
+            log_step(call_id, phone, step, user_input, f"קוד קהילה עודכן בהצלחה ({comm_name_or_err})")
+            return show_update_field_step(session, "UPD_PASS_MENU", prefix=f"קוד הקהילה עודכן בהצלחה ושויכתם ל{clean_tts(comm_name_or_err)}, ")
 
         elif step == "UPD_PASS_MENU":
             if is_back:
@@ -2064,3 +2259,5 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}\n{traceback.format_exc()}", flush=True)
         return show_welcome(SESSIONS.get(call_id, {}), prefix="אירעה שגיאה זמנית, ")
+
+
