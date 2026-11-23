@@ -1,4 +1,3 @@
-
 import os
 import json
 import base64
@@ -149,13 +148,22 @@ PROMPT_FILE_MAP = {
 }
 
 # -------------------------------------------------------------------
-# לוגר מרוכז + שמירת מצב חזרה מצינתוק (/C) בזיכרון ובקובץ
+# לוגר מרוכז + שמירת מצב חזרה מצינתוק (/C -> /D) בזיכרון ובקובץ
 # -------------------------------------------------------------------
 def log_step(call_id: str, phone: str, step: str, user_input: str, action: str):
     ts = datetime.now().strftime("%H:%M:%S")
     cid = str(call_id)[-6:] if call_id else "------"
     inp = user_input if user_input != "" else "[ריק]"
     print(f"[{ts}] [שיחה:{cid} | טל:{phone}] שלב={step} | קלט={inp} ➔ {action}", flush=True)
+
+def get_public_base_url(request: Request) -> str:
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
+    if host and "localhost" not in host and "127.0.0.1" not in host:
+        proto = "https"
+    if host:
+        return f"{proto}://{host}"
+    return str(request.base_url).rstrip("/")
 
 def _load_pending_file() -> dict:
     if os.path.exists(PENDING_FILE):
@@ -554,36 +562,55 @@ def log_transaction_to_sheet(session_data: dict):
     post_to_apps_script(tx_record)
 
 # -------------------------------------------------------------------
-# 3. צינתוק אישי (UpdateExtension ל-/C + RunTzintuk + SendTTS ל-OTP) + גבאי
+# 3. צינתוק אישי:
+#    שלוחה /C (type=tzintuk, tzintuk_end=/D) -> שלוחה /D (type=api -> /tzintuk-done)
 # -------------------------------------------------------------------
-def update_yemot_tzintuk_extension(list_name: str, end_goto: str = "/"):
-    """מגדיר בימות המשיח את שלוחה /C לרשימת הצינתוק האישית ומכוון חזרה ל-/ בסיום"""
+def update_yemot_tzintuk_extensions(list_name: str, base_url: str):
+    """מגדיר בימות המשיח את /C לצינתוקים עם סיום ב-/D, ואת /D כשלוחת API החוזרת ל-/tzintuk-done"""
     if not YEMOT_TOKEN or not list_name:
-        print("[UpdateExtension /C ERROR] חסר טוקן או שם רשימה", flush=True)
+        print("[UpdateExtension ERROR] חסר טוקן או שם רשימה", flush=True)
         return False
 
+    return_api_url = f"{base_url.rstrip('/')}/tzintuk-done"
+
+    # 1. הגדרת שלוחה /D כשלוחת API שמקבלת את החוזרים משלוחה /C
+    try:
+        res_d = requests.post(
+            "https://www.call2all.co.il/ym/api/UpdateExtension",
+            data={
+                "token": YEMOT_TOKEN,
+                "path": "ivr2:/D",
+                "type": "api",
+                "api_link": return_api_url
+            },
+            timeout=8
+        )
+        print(f"[UpdateExtension ivr2:/D] api_link={return_api_url} | תגובה: {res_d.text[:150]}", flush=True)
+    except Exception as e:
+        print(f"[UpdateExtension ivr2:/D ERROR] {e}", flush=True)
+
+    # 2. הגדרת שלוחה /C לרישום לצינתוק והפניה בסיום לשלוחה /D
     for target_path in ["ivr2:/C", "ivr2:C"]:
         try:
-            res = requests.post(
+            res_c = requests.post(
                 "https://www.call2all.co.il/ym/api/UpdateExtension",
                 data={
                     "token": YEMOT_TOKEN,
                     "path": target_path,
                     "type": "tzintuk",
                     "list_tzintuk": list_name,
-                    "tzintuk_end": end_goto
+                    "tzintuk_end": "/D"
                 },
                 timeout=8
             )
-            print(f"[UpdateExtension {target_path}] list_tzintuk={list_name} tzintuk_end={end_goto} | תגובה: {res.text[:150]}", flush=True)
-            if '"OK"' in res.text or '"responseStatus":"OK"' in res.text:
+            print(f"[UpdateExtension {target_path}] list_tzintuk={list_name} tzintuk_end=/D | תגובה: {res_c.text[:150]}", flush=True)
+            if '"OK"' in res_c.text or '"responseStatus":"OK"' in res_c.text:
                 return True
         except Exception as e:
             print(f"[UpdateExtension {target_path} ERROR] {e}", flush=True)
     return False
 
-def redirect_to_tzintuk_c(session: dict, call_id: str, phone: str, return_type: str) -> Response:
-    """מגדיר את שלוחה /C, שומר מצב חזרה ומפנה אליה"""
+def redirect_to_tzintuk_c(session: dict, call_id: str, phone: str, return_type: str, request: Request) -> Response:
     user = session.get("user")
     tzintuk_list_name = phone or session.get("reg_data", {}).get("phone", "") or (get_user_phone(user) if user else "")
     if return_type == "REG":
@@ -594,9 +621,10 @@ def redirect_to_tzintuk_c(session: dict, call_id: str, phone: str, return_type: 
     else:
         session["step"] = "GABAI_RETURN_FROM_TZINTUK"
 
-    update_yemot_tzintuk_extension(tzintuk_list_name, end_goto="/")
+    base_url = get_public_base_url(request)
+    update_yemot_tzintuk_extensions(tzintuk_list_name, base_url)
     save_pending_tzintuk(call_id, phone, return_type, session)
-    log_step(call_id, phone, session["step"], "", f"מעבר לשלוחה /C (רשימה: {tzintuk_list_name}, חזרה ל-/)")
+    log_step(call_id, phone, session["step"], "", f"מעבר לשלוחה /C (רשימה: {tzintuk_list_name}, חזרה דרך /D)")
     return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
 
 def send_personal_tzintuk_by_list(target_phone: str):
@@ -710,7 +738,7 @@ def process_gabai_message(rec_path: str, caller_phone: str, user: Optional[dict]
     })
 
 # -------------------------------------------------------------------
-# 4. פונקציות עזר לפורמט read= של ימות המשיח (לפי התיעוד הרשמי)
+# 4. פונקציות עזר לפורמט read= של ימות המשיח
 # -------------------------------------------------------------------
 def opts_menu(max_d: int = 1, min_d: int = 1, sec: int = 7, allow_star: bool = True) -> str:
     block_star = "no" if allow_star else "yes"
@@ -754,8 +782,12 @@ WELCOME_TEXT = (
     "להשארת הודעה לגבאי הקישו 5"
 )
 
-def show_welcome(session: dict, prefix: str = "") -> Response:
+def show_welcome(session: dict, prefix: str = "", return_to_root: bool = False) -> Response:
     session["step"] = "WELCOME"
+    if return_to_root:
+        if prefix:
+            return Response(content=f"id_list_message=t-{clean_tts(prefix)}&go_to_folder=/", media_type="text/plain; charset=utf-8")
+        return Response(content="go_to_folder=/", media_type="text/plain; charset=utf-8")
     msg = f"{prefix}{WELCOME_TEXT}" if prefix else WELCOME_TEXT
     return yemot_read(msg, "welcome_choice", opts_menu(1, 1, 7, allow_star=True), "001")
 
@@ -996,10 +1028,18 @@ def start_forgot_password(session: dict, background_tasks: BackgroundTasks) -> R
     return yemot_read(msg, "forgot_otp_input", opts_menu(6, 6, 15, allow_star=False))
 
 # -------------------------------------------------------------------
-# 6. Webhook ראשי
+# 6. נתיבי ה-Webhook (שלוחה ראשית / ושלוחה /D לחזרה מצינתוק)
 # -------------------------------------------------------------------
+@app.api_route("/tzintuk-done", methods=["GET", "POST", "HEAD"])
+async def tzintuk_done_handler(request: Request, background_tasks: BackgroundTasks):
+    """שלוחה /D אליה עובר המאזין אוטומטית בסיום שלוחה /C"""
+    return await handle_ivr_request(request, background_tasks, from_tzintuk_endpoint=True)
+
 @app.api_route("/", methods=["GET", "POST", "HEAD"])
 async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
+    return await handle_ivr_request(request, background_tasks, from_tzintuk_endpoint=False)
+
+async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks, from_tzintuk_endpoint: bool = False):
     if request.method == "HEAD":
         return Response(content="OK", media_type="text/plain")
 
@@ -1013,6 +1053,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         call_id = params.get("ApiCallId") or params.get("phone") or "default_session"
         phone = params.get("ApiPhone", "").strip()
         token = params.get("token") or YEMOT_TOKEN
+        api_ext = params.get("ApiExtension", "").strip()
 
         if params.get("hangup") == "yes":
             ext_hangup = params.get("ApiHangupExtension", "")
@@ -1043,27 +1084,23 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         session = SESSIONS[call_id]
         step = session["step"]
 
-        # לוג קצר של פרמטרים נכנסים לאבחון חזרות בין שלוחות
         non_api_params = {k: v for k, v in params.items() if not k.startswith("Api")}
-        print(f"[REQ] שיחה:{str(call_id)[-6:]} | טל:{phone} | שלב נוכחי={step} | פרמטרים={non_api_params}", flush=True)
+        print(f"[REQ ext={api_ext or '/'} ep={'D' if from_tzintuk_endpoint else '/'}] שיחה:{str(call_id)[-6:]} | טל:{phone} | שלב={step} | פרמטרים={non_api_params}", flush=True)
 
         # ---------------------------------------------------------
-        # שחזור וחזרה אוטומטית משלוחה /C (צינתוק אישי)
+        # שחזור וחזרה אוטומטית משלוחה /C -> /D (/tzintuk-done)
         # ---------------------------------------------------------
-        is_returning_from_c = step in ["REG_RETURN_FROM_TZINTUK", "UPD_RETURN_FROM_TZINTUK", "GABAI_RETURN_FROM_TZINTUK"]
-        pending_c = None
-        if is_returning_from_c or step == "WELCOME":
+        is_awaiting_c = step in ["REG_RETURN_FROM_TZINTUK", "UPD_RETURN_FROM_TZINTUK", "GABAI_RETURN_FROM_TZINTUK"]
+        if is_awaiting_c or (from_tzintuk_endpoint and "reg_password" not in params and "reg_end_choice" not in params and step in ["WELCOME", "REG_RETURN_FROM_TZINTUK", "UPD_RETURN_FROM_TZINTUK", "GABAI_RETURN_FROM_TZINTUK"]):
             pending_c = pop_pending_tzintuk(call_id, phone)
-
-        if is_returning_from_c or pending_c:
             rtype = (pending_c or {}).get("return_type")
             if not rtype:
-                if step == "REG_RETURN_FROM_TZINTUK":
-                    rtype = "REG"
-                elif step == "UPD_RETURN_FROM_TZINTUK":
+                if step == "UPD_RETURN_FROM_TZINTUK":
                     rtype = "UPD"
                 elif step == "GABAI_RETURN_FROM_TZINTUK":
                     rtype = "GABAI"
+                else:
+                    rtype = "REG"
 
             if rtype == "REG":
                 if pending_c:
@@ -1071,20 +1108,20 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     session["reg_return_to"] = pending_c.get("reg_return_to", "MAIN_MENU")
                 session["reg_data"]["personal_tzintuk"] = "TRUE"
                 session["step"] = "REG_PASSWORD"
-                log_step(call_id, phone, "RETURN_FROM_C", "", "חזר משלוחה /C ➔ מבקש קוד סיסמא בן 6 ספרות")
+                log_step(call_id, phone, "RETURN_FROM_C(/D)", "", "חזר מרישום צינתוק ➔ מבקש קוד סיסמא בן 6 ספרות")
                 return yemot_read("הרישום לצינתוקים האישיים הושלם. כעת לסיום הרישום אנא הקישו קוד סיסמא אישי בן 6 ספרות ולאחר מכן הקישו סולמית", "reg_password", opts_digits_confirm(6, 6, 7, allow_star=False))
 
             if rtype == "UPD":
                 if pending_c and pending_c.get("user"):
                     session["user"] = pending_c["user"]
-                log_step(call_id, phone, "RETURN_FROM_C", "", "חזר משלוחה /C ➔ חזרה לאזור אישי")
+                log_step(call_id, phone, "RETURN_FROM_C(/D)", "", "חזר מרישום צינתוק ➔ חזרה לאזור אישי")
                 return show_personal_area_menu(session, prefix="נרשמתם בהצלחה לצינתוקים אישיים, ")
 
             if rtype == "GABAI":
                 if pending_c and pending_c.get("user"):
                     session["user"] = pending_c["user"]
                 session["step"] = "GABAI_RECORD_MSG"
-                log_step(call_id, phone, "RETURN_FROM_C", "", "חזר משלוחה /C ➔ הקלטת הודעה לגבאי (/5)")
+                log_step(call_id, phone, "RETURN_FROM_C(/D)", "", "חזר מרישום צינתוק ➔ הקלטת הודעה לגבאי (/5)")
                 return yemot_read_record("נרשמתם לצינתוק אישי. כעת אנא השאירו את הודעתכם לגבאי ולאחר מכן הקישו סולמית", "gabai_msg", "/5", skip_menu=False)
 
         # שליפת קלט נוכחי מהבקשה
@@ -1277,10 +1314,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             return show_categories(session, prefix="הסיסמא עודכנה בהצלחה, ")
 
         # ---------------------------------------------------------
-        # תהליך רישום:
-        # ת.ז -> בחירת טלפון (1 מחייג / 2 אחר) -> שם (ללא תפריט) -> עיר
-        # -> כתובת ללא עיר (ללא תפריט) -> בחירת קוד קהילה (1 להקשה / 2 דילוג)
-        # -> צינתוק אישי /C -> חזרה לסיסמא 6 ספרות -> שמירה
+        # תהליך רישום
         # ---------------------------------------------------------
         elif step == "REG_ID":
             if not user_input or len(user_input) < 8 or len(user_input) > 9:
@@ -1401,7 +1435,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             elif user_input == "2":
                 session["reg_data"]["community_code"] = ""
                 log_step(call_id, phone, step, "2", "דילוג על קוד קהילה ➔ מעבר לשלוחה /C")
-                return redirect_to_tzintuk_c(session, call_id, phone, "REG")
+                return redirect_to_tzintuk_c(session, call_id, phone, "REG", request)
             else:
                 return yemot_read("הקשה שגויה. להקשת קוד קהילה הקישו 1, לדילוג הקישו 2", "reg_community_choice", opts_menu())
 
@@ -1412,7 +1446,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
 
             session["reg_data"]["community_code"] = user_input
             log_step(call_id, phone, step, user_input, "קוד קהילה נקלט ➔ מעבר לשלוחה /C")
-            return redirect_to_tzintuk_c(session, call_id, phone, "REG")
+            return redirect_to_tzintuk_c(session, call_id, phone, "REG", request)
 
         elif step == "REG_PASSWORD":
             if not user_input or not user_input.isdigit() or len(user_input) != 6:
@@ -1451,8 +1485,8 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             if user_input == "1":
                 log_step(call_id, phone, step, "1", "מעבר לתפריט ההזמנות")
                 return show_categories(session)
-            log_step(call_id, phone, step, user_input, "חזרה לתפריט ראשי")
-            return show_welcome(session)
+            log_step(call_id, phone, step, user_input, "חזרה לתפריט ראשי (/)")
+            return show_welcome(session, return_to_root=from_tzintuk_endpoint)
 
         # ---------------------------------------------------------
         # שחזור סל פתוח + תפריט ההזמנות
@@ -1666,7 +1700,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return start_registration(session, return_to="PERSONAL_AREA_MENU")
             elif user_input in ["9", "*"]:
                 log_step(call_id, phone, step, user_input, "חזרה לתפריט ראשי")
-                return show_welcome(session)
+                return show_welcome(session, return_to_root=from_tzintuk_endpoint)
             else:
                 return show_personal_area_menu(session, prefix="הקשה שגויה, ")
 
@@ -1823,7 +1857,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 user["personal_tzintuk"] = "TRUE"
                 sync_user_in_cache(user)
                 background_tasks.add_task(update_user_in_sheet, dict(user))
-                return redirect_to_tzintuk_c(session, call_id, phone, "UPD")
+                return redirect_to_tzintuk_c(session, call_id, phone, "UPD", request)
             elif user_input == "2":
                 return show_personal_area_menu(session, prefix="עדכון הפרטים הסתיים, ")
             return show_update_field_step(session, "UPD_TZINTUK_MENU", prefix="הקשה שגויה, ")
@@ -1885,7 +1919,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                     user["personal_tzintuk"] = "TRUE"
                     sync_user_in_cache(user)
                     background_tasks.add_task(update_user_in_sheet, dict(user))
-                return redirect_to_tzintuk_c(session, call_id, phone, "GABAI")
+                return redirect_to_tzintuk_c(session, call_id, phone, "GABAI", request)
             elif user_input == "2":
                 session["step"] = "GABAI_RECORD_MSG"
                 log_step(call_id, phone, step, "2", "הקלטה לגבאי ללא צינתוק (/5)")
@@ -1899,11 +1933,12 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
             log_step(call_id, phone, step, raw_user_input, "הודעה נשמרה ב-/5 ונשלחת למייל הגבאי")
             background_tasks.add_task(process_gabai_message, raw_user_input, phone, session.get("user"), token)
             background_tasks.add_task(log_general_event, call_id, phone, "הודעה לגבאי", f"נשמרה ב-/5 ונשלחה למייל: {raw_user_input}")
-            return show_welcome(session, prefix="הודעתכם נשמרה במערכת ונשלחה למייל הגבאי בהצלחה, ")
+            return show_welcome(session, prefix="הודעתכם נשמרה במערכת ונשלחה למייל הגבאי בהצלחה, ", return_to_root=from_tzintuk_endpoint)
 
         return yemot_msg("אירעה שגיאה במערכת, השיחה תנותק")
 
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}\n{traceback.format_exc()}", flush=True)
         return show_welcome(SESSIONS.get(call_id, {}), prefix="אירעה שגיאה זמנית, ")
+
 
