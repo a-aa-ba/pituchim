@@ -82,12 +82,14 @@ STEP_PARAM_MAP = {
     "FORGOT_OTP_INPUT": ["forgot_otp_input", "ApiRealAnswer"],
     "FORGOT_NEW_PASS": ["forgot_new_pass", "ApiRealAnswer"],
     "REG_ID": ["reg_id", "ApiRealAnswer"],
+    "REG_PHONE_CHOICE": ["reg_phone_choice", "ApiRealAnswer"],
     "REG_PHONE": ["reg_phone", "ApiRealAnswer"],
     "REG_NAME": ["reg_name", "my_rec", "ApiRealAnswer"],
     "REG_NAME_CONFIRM": ["reg_name_confirm_choice", "ApiRealAnswer"],
     "REG_CITY": ["reg_city", "ApiRealAnswer"],
     "REG_ADDRESS": ["reg_address", "my_rec", "ApiRealAnswer"],
     "REG_ADDRESS_CONFIRM": ["reg_address_confirm_choice", "ApiRealAnswer"],
+    "REG_COMMUNITY_CHOICE": ["reg_community_choice", "ApiRealAnswer"],
     "REG_COMMUNITY_CODE": ["reg_community_code", "ApiRealAnswer"],
     "REG_RETURN_FROM_TZINTUK": [],
     "REG_PASSWORD": ["reg_password", "ApiRealAnswer"],
@@ -211,13 +213,12 @@ def pop_pending_tzintuk(call_id: str, phone: str) -> Optional[dict]:
                 found = disk.get(k)
                 break
 
-    # ניקוי מפתחות מהזיכרון ומהקובץ
     for k in keys:
         PENDING_TZINTUK.pop(k, None)
         disk.pop(k, None)
     _save_pending_file(disk)
 
-    if found and (now - found.get("timestamp", 0)) <= 300:
+    if found and (now - found.get("timestamp", 0)) <= 600:
         return found
     return None
 
@@ -570,18 +571,33 @@ def update_yemot_tzintuk_extension(list_name: str, end_goto: str = "/"):
                     "path": target_path,
                     "type": "tzintuk",
                     "list_tzintuk": list_name,
-                    "tzintuk_end": end_goto,
-                    "end_goto": end_goto,
-                    "tzintuk_end_goto": end_goto
+                    "tzintuk_end": end_goto
                 },
                 timeout=8
             )
-            print(f"[UpdateExtension {target_path}] list_tzintuk={list_name} | תגובה: {res.text[:150]}", flush=True)
+            print(f"[UpdateExtension {target_path}] list_tzintuk={list_name} tzintuk_end={end_goto} | תגובה: {res.text[:150]}", flush=True)
             if '"OK"' in res.text or '"responseStatus":"OK"' in res.text:
                 return True
         except Exception as e:
             print(f"[UpdateExtension {target_path} ERROR] {e}", flush=True)
     return False
+
+def redirect_to_tzintuk_c(session: dict, call_id: str, phone: str, return_type: str) -> Response:
+    """מגדיר את שלוחה /C, שומר מצב חזרה ומפנה אליה"""
+    user = session.get("user")
+    tzintuk_list_name = phone or session.get("reg_data", {}).get("phone", "") or (get_user_phone(user) if user else "")
+    if return_type == "REG":
+        session["reg_data"]["tzintuk_list"] = tzintuk_list_name
+        session["step"] = "REG_RETURN_FROM_TZINTUK"
+    elif return_type == "UPD":
+        session["step"] = "UPD_RETURN_FROM_TZINTUK"
+    else:
+        session["step"] = "GABAI_RETURN_FROM_TZINTUK"
+
+    update_yemot_tzintuk_extension(tzintuk_list_name, end_goto="/")
+    save_pending_tzintuk(call_id, phone, return_type, session)
+    log_step(call_id, phone, session["step"], "", f"מעבר לשלוחה /C (רשימה: {tzintuk_list_name}, חזרה ל-/)")
+    return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
 
 def send_personal_tzintuk_by_list(target_phone: str):
     if not target_phone or not YEMOT_TOKEN:
@@ -696,10 +712,6 @@ def process_gabai_message(rec_path: str, caller_phone: str, user: Optional[dict]
 # -------------------------------------------------------------------
 # 4. פונקציות עזר לפורמט read= של ימות המשיח (לפי התיעוד הרשמי)
 # -------------------------------------------------------------------
-# סדר הערכים להקשה ב-read=sound=var_name,arg2..arg15:
-# 2:re_use, 3:max, 4:min, 5:sec, 6:play_type, 7:block_star(yes/no),
-# 8:block_zero(yes/no), 9:replace_char, 10:allowed_keys, 11:attempts,
-# 12:ok_empty, 13:empty_val, 14:lang_lock, 15:ask_ok(no=ללא אישור, ריק=עם אישור)
 def opts_menu(max_d: int = 1, min_d: int = 1, sec: int = 7, allow_star: bool = True) -> str:
     block_star = "no" if allow_star else "yes"
     return f"no,{max_d},{min_d},{sec},No,{block_star},no,,,,,,,,no"
@@ -721,10 +733,6 @@ def yemot_read(text: str, var_name: str, options: str = None, file_num: str = ""
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 def yemot_read_record(text: str, var_name: str, record_folder: str = "", file_num: str = "", skip_menu: bool = True) -> Response:
-    """
-    פורמט ימות המשיח להקלטה:
-    read=sound=var_name,re_use(no),record,folder,file_name,end_menu(no=אישור מיידי על # ללא תפריט M3345)
-    """
     sound_str = build_sound(text, file_num)
     folder = record_folder if (record_folder and record_folder != "/") else ""
     end_menu = "no" if skip_menu else ""
@@ -839,7 +847,6 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
         )
 
     session["step"] = "PRODUCT_LOOP"
-    # מיקום 1..15 מדויק: המתנה 5 שניות, כוכבית מותרת, חזרה 1, ריק=Ok -> TIMEOUT, ללא אישור
     options = "no,1,1,5,No,no,no,,,,1,Ok,TIMEOUT,,no"
     return Response(content=f"read={sound_chain}=product_choice,{options}&rate=3&tts_rate=3", media_type="text/plain; charset=utf-8")
 
@@ -963,9 +970,9 @@ def start_registration(session: dict, return_to: str = "MAIN_MENU", prefill_id: 
     session["reg_return_to"] = return_to
     if prefill_id:
         session["reg_data"]["id_number"] = prefill_id
-        session["step"] = "REG_PHONE"
-        msg = "עוברים לתהליך הרשמה. מספר תעודת הזהות נקלט. אנא הקישו את מספר הטלפון שלכם בן 9 עד 10 ספרות ולאחר מכן סולמית. לבחירת המספר ממנו אתם מחייגים הקישו 1 וסולמית"
-        return yemot_read(msg, "reg_phone", opts_digits_confirm(10, 1, 7, allow_star=False), "009")
+        session["step"] = "REG_PHONE_CHOICE"
+        msg = "עוברים לתהליך הרשמה. מספר תעודת הזהות נקלט. לרישום עם מספר הטלפון ממנו אתם מחייגים הקישו 1, להקשת מספר טלפון אחר הקישו 2"
+        return yemot_read(msg, "reg_phone_choice", opts_menu())
 
     session["step"] = "REG_ID"
     msg = "תהליך הרשמה. אנא הקישו את מספר תעודת הזהות שלכם בן 8 עד 9 ספרות ולאחר מכן הקישו סולמית"
@@ -1007,7 +1014,6 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         phone = params.get("ApiPhone", "").strip()
         token = params.get("token") or YEMOT_TOKEN
 
-        # התעלמות מבקשת הניתוק הסופית של ימות המשיח כדי שלא תשבש מצבים
         if params.get("hangup") == "yes":
             ext_hangup = params.get("ApiHangupExtension", "")
             log_step(call_id, phone, "HANGUP", "", f"השיחה נותקה בשלוחה {ext_hangup}")
@@ -1037,12 +1043,16 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         session = SESSIONS[call_id]
         step = session["step"]
 
+        # לוג קצר של פרמטרים נכנסים לאבחון חזרות בין שלוחות
+        non_api_params = {k: v for k, v in params.items() if not k.startswith("Api")}
+        print(f"[REQ] שיחה:{str(call_id)[-6:]} | טל:{phone} | שלב נוכחי={step} | פרמטרים={non_api_params}", flush=True)
+
         # ---------------------------------------------------------
         # שחזור וחזרה אוטומטית משלוחה /C (צינתוק אישי)
         # ---------------------------------------------------------
         is_returning_from_c = step in ["REG_RETURN_FROM_TZINTUK", "UPD_RETURN_FROM_TZINTUK", "GABAI_RETURN_FROM_TZINTUK"]
         pending_c = None
-        if is_returning_from_c or (step == "WELCOME" and not params.get("welcome_choice")):
+        if is_returning_from_c or step == "WELCOME":
             pending_c = pop_pending_tzintuk(call_id, phone)
 
         if is_returning_from_c or pending_c:
@@ -1184,7 +1194,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 target = session.get("auth_target", "MAIN_MENU")
                 reg_return = "PERSONAL_AREA_MENU" if target in ["PERSONAL_UPDATE", "TX_HISTORY"] else "MAIN_MENU"
                 prefill_id = session.get("pending_unauth_id", "")
-                log_step(call_id, phone, step, "2", f"מעבר לרישום עם ת.ז מוזנת אוטומטית ({prefill_id}) ➔ טלפון")
+                log_step(call_id, phone, step, "2", f"מעבר לרישום עם ת.ז מוזנת ({prefill_id}) ➔ בחירת טלפון")
                 return start_registration(session, return_to=reg_return, prefill_id=prefill_id)
             else:
                 log_step(call_id, phone, step, user_input, "הקשה שגויה ➔ בקשה חוזרת (1 אחר / 2 רישום)")
@@ -1268,8 +1278,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
 
         # ---------------------------------------------------------
         # תהליך רישום:
-        # ת.ז -> טלפון (או 1#) -> שם (ללא תפריט) -> עיר -> כתובת ללא עיר (ללא תפריט)
-        # -> קוד קהילה (*# לדילוג) -> צינתוק אישי /C -> חזרה לסיסמא 6 ספרות -> שמירה
+        # ת.ז -> בחירת טלפון (1 מחייג / 2 אחר) -> שם (ללא תפריט) -> עיר
+        # -> כתובת ללא עיר (ללא תפריט) -> בחירת קוד קהילה (1 להקשה / 2 דילוג)
+        # -> צינתוק אישי /C -> חזרה לסיסמא 6 ספרות -> שמירה
         # ---------------------------------------------------------
         elif step == "REG_ID":
             if not user_input or len(user_input) < 8 or len(user_input) > 9:
@@ -1280,23 +1291,31 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 return yemot_read("מספר תעודת זהות זה כבר רשום במערכת, אנא הקישו מספר תעודת זהות אחר", "reg_id", opts_digits_confirm(9, 8, 7, allow_star=False), "008")
 
             session["reg_data"]["id_number"] = user_input
-            session["step"] = "REG_PHONE"
-            log_step(call_id, phone, step, user_input, "ת.ז נקלטה ➔ בקשת טלפון (או 1# למספר המחייג)")
-            return yemot_read("אנא הקישו את מספר הטלפון שלכם בן 9 עד 10 ספרות ולאחר מכן הקישו סולמית. לבחירת המספר ממנו אתם מחייגים הקישו 1 וסולמית", "reg_phone", opts_digits_confirm(10, 1, 7, allow_star=False), "009")
+            session["step"] = "REG_PHONE_CHOICE"
+            log_step(call_id, phone, step, user_input, "ת.ז נקלטה ➔ בחירת טלפון (1 מחייג / 2 אחר)")
+            return yemot_read("לרישום עם מספר הטלפון ממנו אתם מחייגים הקישו 1, להקשת מספר טלפון אחר הקישו 2", "reg_phone_choice", opts_menu())
 
-        elif step == "REG_PHONE":
+        elif step == "REG_PHONE_CHOICE":
             if user_input == "1":
                 if phone and phone.isdigit() and len(phone) >= 9:
                     session["reg_data"]["phone"] = phone
                     session["step"] = "REG_NAME"
                     log_step(call_id, phone, step, "1", f"נבחר מספר מחייג ({phone}) ➔ הקלטת שם")
                     return yemot_read_record("נקלט המספר ממנו אתם מחייגים. כעת אנא אמרו בקול ברור את שמכם הפרטי והמשפחתי ולאחר מכן הקישו סולמית", "reg_name", "", "005", skip_menu=True)
-                log_step(call_id, phone, step, "1", "מספר מחייג חסוי/לא תקין ➔ בקשת הקשה ידנית")
-                return yemot_read("המספר ממנו אתם מחייגים אינו מזוהה. אנא הקישו ידנית מספר טלפון בן 9 עד 10 ספרות ולאחר מכן סולמית", "reg_phone", opts_digits_confirm(10, 1, 7, allow_star=False), "009")
+                session["step"] = "REG_PHONE"
+                log_step(call_id, phone, step, "1", "מספר מחייג אינו מזוהה ➔ מעבר להקשה ידנית")
+                return yemot_read("המספר ממנו אתם מחייגים אינו מזוהה. אנא הקישו את מספר הטלפון שלכם בן 9 עד 10 ספרות ולאחר מכן הקישו סולמית", "reg_phone", opts_digits_confirm(10, 9, 7, allow_star=False), "009")
+            elif user_input == "2":
+                session["step"] = "REG_PHONE"
+                log_step(call_id, phone, step, "2", "בחירה להקיש טלפון אחר")
+                return yemot_read("אנא הקישו את מספר הטלפון שלכם בן 9 עד 10 ספרות ולאחר מכן הקישו סולמית", "reg_phone", opts_digits_confirm(10, 9, 7, allow_star=False), "009")
+            else:
+                return yemot_read("הקשה שגויה. לרישום עם מספר הטלפון ממנו אתם מחייגים הקישו 1, להקשת מספר אחר הקישו 2", "reg_phone_choice", opts_menu())
 
+        elif step == "REG_PHONE":
             if not user_input or not user_input.isdigit() or len(user_input) < 9 or len(user_input) > 10:
                 log_step(call_id, phone, step, user_input, "טלפון לא תקין")
-                return yemot_read("מספר לא תקין. אנא הקישו מספר טלפון בן 9 עד 10 ספרות או הקישו 1 וסולמית לבחירת המספר המחייג", "reg_phone", opts_digits_confirm(10, 1, 7, allow_star=False), "009")
+                return yemot_read("מספר לא תקין. אנא הקישו מספר טלפון בן 9 עד 10 ספרות ולאחר מכן הקישו סולמית", "reg_phone", opts_digits_confirm(10, 9, 7, allow_star=False), "009")
 
             session["reg_data"]["phone"] = user_input
             session["step"] = "REG_NAME"
@@ -1363,9 +1382,9 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif step == "REG_ADDRESS_CONFIRM":
             if user_input == "1":
                 session["reg_data"]["address"] = session["reg_data"].get("temp_address", "")
-                session["step"] = "REG_COMMUNITY_CODE"
-                log_step(call_id, phone, step, "1", "כתובת אושרה ➔ בקשת קוד קהילה (*# לדילוג, כוכבית מאופשרת)")
-                return yemot_read("אנא הקישו את קוד הקהילה שלכם בן 6 ספרות ולאחר מכן הקישו סולמית. לדילוג הקישו כוכבית סולמית", "reg_community_code", opts_digits_confirm(6, 1, 7, allow_star=True), "012")
+                session["step"] = "REG_COMMUNITY_CHOICE"
+                log_step(call_id, phone, step, "1", "כתובת אושרה ➔ בחירה: קוד קהילה (1) או דילוג (2)")
+                return yemot_read("להקשת קוד קהילה הקישו 1, לדילוג הקישו 2", "reg_community_choice", opts_menu())
             elif user_input == "2":
                 session["step"] = "REG_ADDRESS"
                 log_step(call_id, phone, step, "2", "הקלטת כתובת מחדש")
@@ -1374,26 +1393,26 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 clean_addr = clean_tts(session["reg_data"].get("temp_address", ""))
                 return yemot_read(f"הקשה שגויה. הכתובת שנקלטה היא {clean_addr}. לאישור הקישו 1, להקלטה מחדש הקישו 2", "reg_address_confirm_choice", opts_menu())
 
-        elif step == "REG_COMMUNITY_CODE":
-            if user_input in ["*", "*#", "**", "/", "0", ""]:
-                community_code = ""
-                log_step(call_id, phone, step, raw_user_input or "*", "דילוג על קוד קהילה (ריק)")
-            elif len(user_input) == 6 and user_input.isdigit():
-                community_code = user_input
-                log_step(call_id, phone, step, community_code, "קוד קהילה נקלט")
+        elif step == "REG_COMMUNITY_CHOICE":
+            if user_input == "1":
+                session["step"] = "REG_COMMUNITY_CODE"
+                log_step(call_id, phone, step, "1", "בחירה להקיש קוד קהילה")
+                return yemot_read("אנא הקישו את קוד הקהילה שלכם בן 6 ספרות ולאחר מכן הקישו סולמית", "reg_community_code", opts_digits_confirm(6, 6, 7, allow_star=False), "012")
+            elif user_input == "2":
+                session["reg_data"]["community_code"] = ""
+                log_step(call_id, phone, step, "2", "דילוג על קוד קהילה ➔ מעבר לשלוחה /C")
+                return redirect_to_tzintuk_c(session, call_id, phone, "REG")
             else:
-                log_step(call_id, phone, step, user_input, "קוד קהילה לא תקין")
-                return yemot_read("קוד קהילה חייב להיות בן 6 ספרות, או הקישו כוכבית סולמית לדילוג", "reg_community_code", opts_digits_confirm(6, 1, 7, allow_star=True), "012")
+                return yemot_read("הקשה שגויה. להקשת קוד קהילה הקישו 1, לדילוג הקישו 2", "reg_community_choice", opts_menu())
 
-            session["reg_data"]["community_code"] = community_code
+        elif step == "REG_COMMUNITY_CODE":
+            if not user_input or len(user_input) != 6 or not user_input.isdigit():
+                log_step(call_id, phone, step, user_input, "קוד קהילה לא תקין (נדרשות 6 ספרות)")
+                return yemot_read("קוד קהילה חייב להיות בן 6 ספרות. אנא הקישו שוב ולאחר מכן סולמית", "reg_community_code", opts_digits_confirm(6, 6, 7, allow_star=False), "012")
 
-            tzintuk_list_name = phone or session["reg_data"].get("phone", "")
-            session["reg_data"]["tzintuk_list"] = tzintuk_list_name
-            update_yemot_tzintuk_extension(tzintuk_list_name, end_goto="/")
-            session["step"] = "REG_RETURN_FROM_TZINTUK"
-            save_pending_tzintuk(call_id, phone, "REG", session)
-            log_step(call_id, phone, step, community_code or "[ריק]", f"מעבר לשלוחה /C לרישום צינתוק אישי (רשימה: {tzintuk_list_name})")
-            return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
+            session["reg_data"]["community_code"] = user_input
+            log_step(call_id, phone, step, user_input, "קוד קהילה נקלט ➔ מעבר לשלוחה /C")
+            return redirect_to_tzintuk_c(session, call_id, phone, "REG")
 
         elif step == "REG_PASSWORD":
             if not user_input or not user_input.isdigit() or len(user_input) != 6:
@@ -1804,12 +1823,7 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
                 user["personal_tzintuk"] = "TRUE"
                 sync_user_in_cache(user)
                 background_tasks.add_task(update_user_in_sheet, dict(user))
-                tzintuk_list = phone or get_user_phone(user)
-                update_yemot_tzintuk_extension(tzintuk_list, end_goto="/")
-                session["step"] = "UPD_RETURN_FROM_TZINTUK"
-                save_pending_tzintuk(call_id, phone, "UPD", session)
-                log_step(call_id, phone, step, "1", f"מעבר לשלוחה /C לרישום צינתוק אישי ({tzintuk_list})")
-                return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
+                return redirect_to_tzintuk_c(session, call_id, phone, "UPD")
             elif user_input == "2":
                 return show_personal_area_menu(session, prefix="עדכון הפרטים הסתיים, ")
             return show_update_field_step(session, "UPD_TZINTUK_MENU", prefix="הקשה שגויה, ")
@@ -1867,16 +1881,11 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
         elif step == "GABAI_TZINTUK_PROMPT":
             if user_input == "1":
                 user = session.get("user")
-                tzintuk_list = phone or (get_user_phone(user) if user else "")
                 if user:
                     user["personal_tzintuk"] = "TRUE"
                     sync_user_in_cache(user)
                     background_tasks.add_task(update_user_in_sheet, dict(user))
-                update_yemot_tzintuk_extension(tzintuk_list, end_goto="/")
-                session["step"] = "GABAI_RETURN_FROM_TZINTUK"
-                save_pending_tzintuk(call_id, phone, "GABAI", session)
-                log_step(call_id, phone, step, "1", f"מעבר לשלוחה /C לרישום צינתוק אישי ({tzintuk_list})")
-                return Response(content="go_to_folder=/C", media_type="text/plain; charset=utf-8")
+                return redirect_to_tzintuk_c(session, call_id, phone, "GABAI")
             elif user_input == "2":
                 session["step"] = "GABAI_RECORD_MSG"
                 log_step(call_id, phone, step, "2", "הקלטה לגבאי ללא צינתוק (/5)")
@@ -1897,5 +1906,4 @@ async def ivr_handler(request: Request, background_tasks: BackgroundTasks):
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}\n{traceback.format_exc()}", flush=True)
         return show_welcome(SESSIONS.get(call_id, {}), prefix="אירעה שגיאה זמנית, ")
-
 
