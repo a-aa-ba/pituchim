@@ -406,10 +406,8 @@ def format_price(val) -> str:
         return clean_tts(str(val))
 
 def get_field(item: dict, *keys, default=""):
-    """שליפת שדה בצורה גמישה לחלוטין (רגיש פחות לרווחים, מרכאות ומקפים)"""
     if not item or not isinstance(item, dict):
         return default
-
     for k in keys:
         if k in item and item[k] is not None and str(item[k]).strip() != "":
             return item[k]
@@ -435,7 +433,7 @@ def normalize_code(val: Any) -> str:
     return digits
 
 def get_user_id(user: dict) -> str:
-    return str(get_field(user, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "id_number", "id") or get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
+    return str(get_field(user, "תעודת זהות", "ת.ז", "id_number", "id") or get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
 
 def get_user_phone(user: dict) -> str:
     return str(get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
@@ -482,9 +480,9 @@ def validate_community_code(code: str) -> tuple[bool, str]:
 
 def has_community_discount(user: Optional[dict]) -> bool:
     """
-    בדיקה גמישה ומלאה של זכאות למחיר קהילה:
-    1. קוד קהילה תקין בכרטיס המשתמש.
-    2. או שתעודת הזהות של המשתמש מופיעה בעמודת הזיהוי (ת.ז) בטבלת 'קודי קהילה'.
+    בודק האם למשתמש יש זכאות למחיר קהילה:
+    1. קוד קהילה תקין בכרטיס המשתמש, או
+    2. תעודת הזהות של המשתמש מופיעה בעמודת 'תעודת זהות' בטבלת 'קודי קהילה'.
     """
     if not user:
         return False
@@ -492,7 +490,7 @@ def has_community_discount(user: Optional[dict]) -> bool:
     u_id = normalize_code(get_user_id(user))
     u_code = normalize_code(get_user_community(user))
 
-    # 1. בדיקה לפי קוד קהילה בכרטיס המשתמש
+    # 1. בדיקה לפי קוד קהילה
     if u_code and u_code not in ["0", "000000"]:
         if CACHE.get("community_codes"):
             for raw_c, info in CACHE["community_codes"].items():
@@ -501,7 +499,7 @@ def has_community_discount(user: Optional[dict]) -> bool:
                     return bool(info.get("active", True))
         return True
 
-    # 2. בדיקה האם ת.ז של המשתמש קיימת בעמודת הזיהוי (ת.ז) בטבלת 'קודי קהילה'
+    # 2. בדיקה האם ת.ז של המשתמש מופיעה תחת עמודת תעודת זהות בקודי קהילה
     if u_id and CACHE.get("community_codes"):
         for raw_c, info in CACHE["community_codes"].items():
             owner_id = normalize_code(info.get("owner", ""))
@@ -533,7 +531,7 @@ def get_product_price_for_user(product: dict, user: Optional[dict]) -> str:
 
     u_id = get_user_id(user) if user else "אנונימי"
     u_code = get_user_community(user) if user else "[ללא]"
-    print(f"[חישוב מחיר] מוצר: {product.get('name')} | משתמש: {u_id} | קוד קהילה: '{u_code}' | זכאי להנחה: {user_has_discount} | מחיר רגיל: {regular_price} | מחיר קהילות: {comm_price} ➔ נבחר: {selected_price}", flush=True)
+    print(f"[חישוב מחיר] מוצר: {product.get('name')} | משתמש: {u_id} | קוד קהילה: '{u_code}' | זכאי להנחה: {user_has_discount} | מחיר רגיל: {regular_price} | מחיר לקהילות: {comm_price} ➔ נבחר: {selected_price}", flush=True)
 
     return selected_price
 
@@ -569,7 +567,7 @@ def load_data_from_sheets():
         for cc in data.get("community_codes", []):
             code_val = normalize_code(get_field(cc, "קוד קהילה", "קוד הקהילה", "קוד", "code"))
             name_val = str(get_field(cc, "שם קהילה", "קהילה", "community_name", "name")).strip()
-            # זיהוי לפי ת.ז
+            # קריאת תעודת הזהות מעמודה C בקודי קהילה
             owner_val = str(get_field(cc, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "מזהה", "פרטי זיהוי בעל הקוד", "פרטי זיהוי", "זיהוי", "איש קשר", "owner", "id_number", "id")).strip()
             is_act = str(get_field(cc, "פעיל", "is_active", default="TRUE")).upper() in ["TRUE", "1", "YES", "כן"]
             if code_val:
@@ -607,9 +605,9 @@ def load_data_from_sheets():
             if in_stock in ["TRUE", "1", "YES", "כן"]:
                 p_sku = str(get_field(p, "מקט", "מק\"ט", "מזהה מוצר", "מזהה", "sku")).strip()
                 p_name = str(get_field(p, "שם מוצר", "שם המוצר", "שם", "מוצר", "name", "product_name")).strip()
-                p_price = str(get_field(p, "מחיר מוצר", "מחיר ליחידה", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
-
-                # זיהוי מחיר לקהילות (כולל עמודה שנוספה עצמאית בין מחיר מוצר להערות)
+                p_price = str(get_field(p, "מחיר ליחידה", "מחיר מוצר", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
+                
+                # קריאת עמודה D ("מחיר לקהילות") שמופיעה בין מחיר ליחידה להערות
                 p_community_price = str(get_field(p, "מחיר לקהילות", "מחיר קהילות", "מחיר קהילה", "מחיר לקהילה", "מחיר קהילתי", "מחיר מוזל", "הנחת קהילה", "community_price", "comm_price")).strip()
                 if not p_community_price:
                     for k, v in p.items():
@@ -621,7 +619,6 @@ def load_data_from_sheets():
                 p_notes = str(get_field(p, "הערות", "הערה", "notes", "description")).strip()
                 p_cat = str(get_field(p, "קטגוריה", "שם קטגוריה", "category_name", "category")).strip()
                 p_kashrut = str(get_field(p, "כשרות", "כשרויות", "kashrut")).strip()
-
                 if p_name:
                     prods.append({
                         "sku": p_sku,
@@ -908,7 +905,7 @@ def process_gabai_message(rec_path: str, caller_phone: str, user: Optional[dict]
     })
 
 # -------------------------------------------------------------------
-# 4. פונקציות מענה לימות המשיח (15 מיקומים ב-read)
+# 4. פונקציות עזר לפורמט read= של ימות המשיח
 # -------------------------------------------------------------------
 def opts_menu(max_d: int = 1, min_d: int = 1, sec: int = 7, allow_star: bool = True) -> str:
     block_star = "no" if allow_star else "yes"
@@ -1387,7 +1384,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             else:
                 msg = (
-                    "הקשה שגויה. המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא שולמה. "
+                    "הקשה שגויה. המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא הושלמה. "
                     "למעבר להמשך ההזמנה הקישו 1, לשמירת ההזמנה במצב המתנה עד לכניסה הבאה למערכת ההזמנות הקישו 2, למחיקת ההזמנה הקישו 3"
                 )
                 return yemot_read(msg, "entry_cart_choice", opts_menu(1, 1, 7, allow_star=False))
@@ -1403,7 +1400,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                     session["step"] = "ENTRY_ABANDONED_CART_CHOICE"
                     log_step(call_id, phone, "WELCOME", "", "זוהתה עסקה פעילה שלא שולמה בכניסה ➔ שאלת המשך/המתנה/מחיקה")
                     msg = (
-                        "המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא שולמה. "
+                        "המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא הושלמה. "
                         "למעבר להמשך ההזמנה הקישו 1, לשמירת ההזמנה במצב המתנה עד לכניסה הבאה למערכת ההזמנות הקישו 2, למחיקת ההזמנה הקישו 3"
                     )
                     return yemot_read(msg, "entry_cart_choice", opts_menu(1, 1, 7, allow_star=False))
@@ -1470,7 +1467,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             if not user_input or not user_input.isdigit() or len(user_input) < 8 or len(user_input) > 9:
                 log_step(call_id, phone, step, user_input, "ת.ז לא תקינה ➔ בקשה חוזרת")
-                return yemot_read("אנא הקישו מספר תעודת זהות תקין בן 8 עד 9 ספרות ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
+                return yemot_read("אנא הקישו מספר תעודת זהות תקין בן 8 עד 9 ספרות ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
 
             if user_input in CACHE["users"]:
                 user = CACHE["users"][user_input]
@@ -1522,7 +1519,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 session["user"] = user
                 session["orders_authenticated"] = True
                 session["pending_login_user"] = None
-                log_step(call_id, phone, step, "******", f"סיסמא תקינה (ת.ז {get_user_id(user)}) ➔ כניסה להזמנות")
+                log_step(call_id, phone, step, "******", f"סיסמא תקינה (ת.ז {get_user_id(user)}) ➔ כניסה")
                 background_tasks.add_task(log_general_event, call_id, phone, "כניסה מוצלחת", f"התחבר ת.ז {get_user_id(user)}")
 
                 target = session.get("auth_target", "MAIN_MENU")
@@ -2329,8 +2326,3 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}\n{traceback.format_exc()}", flush=True)
         return show_welcome(SESSIONS.get(call_id, {}), prefix="אירעה שגיאה זמנית, ")
-
-
-
-
-
