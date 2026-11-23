@@ -1,5 +1,4 @@
 
-
 import os
 import json
 import base64
@@ -64,7 +63,7 @@ SAVED_CARTS_FILE = "/tmp/saved_carts.json"
 
 CACHE = {
     "users": {},
-    "community_codes": {},  # קוד -> {"name": "...", "owner": "...", "active": True}
+    "community_codes": {},
     "categories": [],
     "products": [],
     "transactions": [],
@@ -282,7 +281,7 @@ def pop_pending_tzintuk(call_id: str, phone: str) -> Optional[dict]:
             found = PENDING_TZINTUK.pop(k, None)
             break
 
-    disk = _load_pending_file()
+    disk = _load_json_file(PENDING_FILE)
     if not found:
         for k in keys:
             if k in disk:
@@ -407,15 +406,36 @@ def format_price(val) -> str:
         return clean_tts(str(val))
 
 def get_field(item: dict, *keys, default=""):
+    """שליפת שדה בצורה גמישה לחלוטין (רגיש פחות לרווחים, מרכאות ומקפים)"""
     if not item or not isinstance(item, dict):
         return default
+
     for k in keys:
         if k in item and item[k] is not None and str(item[k]).strip() != "":
             return item[k]
+
+    clean_map = {}
+    for actual_k, actual_v in item.items():
+        ck = str(actual_k).strip().replace('"', '').replace("'", '').replace("_", "").replace(" ", "")
+        if ck and actual_v is not None and str(actual_v).strip() != "":
+            clean_map[ck] = actual_v
+
+    for k in keys:
+        target_ck = str(k).strip().replace('"', '').replace("'", '').replace("_", "").replace(" ", "")
+        if target_ck in clean_map:
+            return clean_map[target_ck]
+
     return default
 
+def normalize_code(val: Any) -> str:
+    s = str(val or "").strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits
+
 def get_user_id(user: dict) -> str:
-    return str(get_field(user, "תעודת זהות", "ת.ז", "id_number", "id") or get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
+    return str(get_field(user, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "id_number", "id") or get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
 
 def get_user_phone(user: dict) -> str:
     return str(get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
@@ -432,7 +452,8 @@ def get_user_address(user: dict) -> str:
     return str(get_field(user, "כתובת", "כתובת מלאה", "address")).strip()
 
 def get_user_community(user: dict) -> str:
-    return str(get_field(user, "קוד קהילה", "community_code")).strip()
+    raw = get_field(user, "קוד קהילה", "קוד הקהילה", "קוד_קהילה", "קוד", "קהילה", "community_code", "community")
+    return normalize_code(raw)
 
 def get_user_password(user: dict) -> str:
     return str(get_field(user, "סיסמא", "סיסמה", "password", "pass")).strip()
@@ -442,42 +463,79 @@ def is_user_personal_tzintuk(user: dict) -> bool:
     return val in ["TRUE", "1", "YES", "כן"]
 
 def validate_community_code(code: str) -> tuple[bool, str]:
-    """
-    בודק האם קוד הקהילה קיים ופעיל בלשונית קודי קהילה.
-    מחזיר (האם_תקין, שם_קהילה_או_סיבת_שגיאה)
-    """
-    clean_c = str(code).strip()
-    if not clean_c or clean_c in ["0", "לא עודכן", "ללא", "none", "None"]:
+    clean_c = normalize_code(code)
+    if not clean_c or clean_c in ["0", "000000"]:
         return False, "קוד ריק"
 
-    # אם עדיין לא הוגדרו קודים בשיטס, מאפשר קוד בן 6 ספרות
-    if not CACHE["community_codes"]:
-        return (len(clean_c) == 6 and clean_c.isdigit()), "קהילה כללית"
+    if CACHE.get("community_codes"):
+        for raw_c, info in CACHE["community_codes"].items():
+            norm_c = normalize_code(raw_c)
+            if norm_c and (norm_c == clean_c or norm_c.zfill(6) == clean_c.zfill(6) or norm_c.lstrip("0") == clean_c.lstrip("0")):
+                if not info.get("active", True):
+                    return False, "קוד מושבת"
+                return True, info.get("name") or "קהילה מאומתת"
 
-    comm_info = CACHE["community_codes"].get(clean_c) or CACHE["community_codes"].get(clean_c.zfill(6))
-    if not comm_info:
-        return False, "קוד לא קיים במערכת"
-    if not comm_info.get("active", True):
-        return False, "קוד מושבת"
-    return True, comm_info.get("name") or "קהילה מאומתת"
+    if 4 <= len(clean_c) <= 9 and clean_c.isdigit():
+        return True, "קהילה כללית"
+
+    return False, "קוד לא תקין"
 
 def has_community_discount(user: Optional[dict]) -> bool:
+    """
+    בדיקה גמישה ומלאה של זכאות למחיר קהילה:
+    1. קוד קהילה תקין בכרטיס המשתמש.
+    2. או שתעודת הזהות של המשתמש מופיעה בעמודת הזיהוי (ת.ז) בטבלת 'קודי קהילה'.
+    """
     if not user:
         return False
-    code = get_user_community(user)
-    valid, _ = validate_community_code(code)
-    return valid
+
+    u_id = normalize_code(get_user_id(user))
+    u_code = normalize_code(get_user_community(user))
+
+    # 1. בדיקה לפי קוד קהילה בכרטיס המשתמש
+    if u_code and u_code not in ["0", "000000"]:
+        if CACHE.get("community_codes"):
+            for raw_c, info in CACHE["community_codes"].items():
+                norm_c = normalize_code(raw_c)
+                if norm_c and (norm_c == u_code or norm_c.zfill(6) == u_code.zfill(6) or norm_c.lstrip("0") == u_code.lstrip("0")):
+                    return bool(info.get("active", True))
+        return True
+
+    # 2. בדיקה האם ת.ז של המשתמש קיימת בעמודת הזיהוי (ת.ז) בטבלת 'קודי קהילה'
+    if u_id and CACHE.get("community_codes"):
+        for raw_c, info in CACHE["community_codes"].items():
+            owner_id = normalize_code(info.get("owner", ""))
+            if owner_id and (owner_id == u_id or owner_id.zfill(9) == u_id.zfill(9) or owner_id.lstrip("0") == u_id.lstrip("0")):
+                if info.get("active", True):
+                    user["community_code"] = raw_c
+                    user["קוד קהילה"] = raw_c
+                    return True
+
+    return False
 
 def get_product_price_for_user(product: dict, user: Optional[dict]) -> str:
     regular_price = str(product.get("price", "0")).replace("₪", "").strip()
     comm_price = str(product.get("community_price", "")).replace("₪", "").strip()
-    if has_community_discount(user) and comm_price:
+
+    if regular_price.endswith(".0"): regular_price = regular_price[:-2]
+    if comm_price.endswith(".0"): comm_price = comm_price[:-2]
+
+    user_has_discount = has_community_discount(user)
+    selected_price = regular_price
+
+    if user_has_discount and comm_price:
         try:
-            float(comm_price)
-            return comm_price
+            val = float(comm_price)
+            if val > 0:
+                selected_price = comm_price
         except ValueError:
             pass
-    return regular_price
+
+    u_id = get_user_id(user) if user else "אנונימי"
+    u_code = get_user_community(user) if user else "[ללא]"
+    print(f"[חישוב מחיר] מוצר: {product.get('name')} | משתמש: {u_id} | קוד קהילה: '{u_code}' | זכאי להנחה: {user_has_discount} | מחיר רגיל: {regular_price} | מחיר קהילות: {comm_price} ➔ נבחר: {selected_price}", flush=True)
+
+    return selected_price
 
 def sync_user_in_cache(user_obj: dict):
     id_num = str(get_field(user_obj, "תעודת זהות", "ת.ז", "id_number", "id")).strip()
@@ -499,7 +557,7 @@ def load_data_from_sheets():
         for u in data.get("users", []):
             is_active = str(get_field(u, "פעיל", "is_active", default="TRUE")).upper()
             if is_active in ["TRUE", "1", "YES", "כן"]:
-                id_num = str(get_field(u, "תעודת זהות", "ת.ז", "id_number", "id")).strip()
+                id_num = str(get_field(u, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "id_number", "id")).strip()
                 phone = str(get_field(u, "מספר טלפון", "טלפון", "phone")).strip()
                 if id_num:
                     users_dict[id_num] = u
@@ -507,12 +565,12 @@ def load_data_from_sheets():
                     users_dict[phone] = u
         CACHE["users"] = users_dict
 
-        # טעינת קודי קהילה
         comm_dict = {}
         for cc in data.get("community_codes", []):
-            code_val = str(get_field(cc, "קוד קהילה", "קוד", "code")).strip()
+            code_val = normalize_code(get_field(cc, "קוד קהילה", "קוד הקהילה", "קוד", "code"))
             name_val = str(get_field(cc, "שם קהילה", "קהילה", "community_name", "name")).strip()
-            owner_val = str(get_field(cc, "פרטי זיהוי בעל הקוד", "פרטי זיהוי", "איש קשר", "owner")).strip()
+            # זיהוי לפי ת.ז
+            owner_val = str(get_field(cc, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "מזהה", "פרטי זיהוי בעל הקוד", "פרטי זיהוי", "זיהוי", "איש קשר", "owner", "id_number", "id")).strip()
             is_act = str(get_field(cc, "פעיל", "is_active", default="TRUE")).upper() in ["TRUE", "1", "YES", "כן"]
             if code_val:
                 comm_dict[code_val] = {
@@ -549,11 +607,21 @@ def load_data_from_sheets():
             if in_stock in ["TRUE", "1", "YES", "כן"]:
                 p_sku = str(get_field(p, "מקט", "מק\"ט", "מזהה מוצר", "מזהה", "sku")).strip()
                 p_name = str(get_field(p, "שם מוצר", "שם המוצר", "שם", "מוצר", "name", "product_name")).strip()
-                p_price = str(get_field(p, "מחיר ליחידה", "מחיר מוצר", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
-                p_community_price = str(get_field(p, "מחיר קהילה", "מחיר לקהילה", "community_price")).strip()
+                p_price = str(get_field(p, "מחיר מוצר", "מחיר ליחידה", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
+
+                # זיהוי מחיר לקהילות (כולל עמודה שנוספה עצמאית בין מחיר מוצר להערות)
+                p_community_price = str(get_field(p, "מחיר לקהילות", "מחיר קהילות", "מחיר קהילה", "מחיר לקהילה", "מחיר קהילתי", "מחיר מוזל", "הנחת קהילה", "community_price", "comm_price")).strip()
+                if not p_community_price:
+                    for k, v in p.items():
+                        clean_k = str(k).strip()
+                        if "קהיל" in clean_k and str(v).strip():
+                            p_community_price = str(v).strip()
+                            break
+
                 p_notes = str(get_field(p, "הערות", "הערה", "notes", "description")).strip()
                 p_cat = str(get_field(p, "קטגוריה", "שם קטגוריה", "category_name", "category")).strip()
                 p_kashrut = str(get_field(p, "כשרות", "כשרויות", "kashrut")).strip()
+
                 if p_name:
                     prods.append({
                         "sku": p_sku,
@@ -579,7 +647,7 @@ def load_data_from_sheets():
             })
         CACHE["transactions"] = txs
 
-        print(f"[CACHE] נטענו: {len(CACHE['users'])} מפתחות משתמש | {len(comm_dict)} קודי קהילה | {len(cats)} קטגוריות | {len(cities)} ערים | {len(prods)} מוצרים | {len(txs)} עסקאות", flush=True)
+        print(f"[CACHE] נטענו: {len(CACHE['users'])} משתמשים | {len(comm_dict)} קודי קהילה | {len(cats)} קטגוריות | {len(cities)} ערים | {len(prods)} מוצרים | {len(txs)} עסקאות", flush=True)
     except Exception as e:
         print(f"[Sheets ERROR] טעינה נכשלה: {e}", flush=True)
 
@@ -743,12 +811,13 @@ def redirect_to_tzintuk_c(session: dict, call_id: str, phone: str, return_type: 
 def send_personal_tzintuk_by_list(target_phone: str):
     if not target_phone or not YEMOT_TOKEN:
         return False
-    params = {"token": YEMOT_TOKEN, "phones": f"tzl:{target_phone}", "TzintukTimeOut": "16"}
+    clean_p = normalize_code(target_phone)
+    params = {"token": YEMOT_TOKEN, "phones": f"tzl:{clean_p}", "TzintukTimeOut": "16"}
     if OTP_CALLER_ID:
         params["callerId"] = OTP_CALLER_ID
     try:
         res = requests.get("https://www.call2all.co.il/ym/api/RunTzintuk", params=params, timeout=15)
-        print(f"[RunTzintuk] נשלח לרשימה tzl:{target_phone} | תגובה: {res.text[:120]}", flush=True)
+        print(f"[RunTzintuk] נשלח לרשימה tzl:{clean_p} | תגובה: {res.text[:120]}", flush=True)
         return True
     except Exception as e:
         print(f"[RunTzintuk ERROR] {e}", flush=True)
@@ -1453,7 +1522,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 session["user"] = user
                 session["orders_authenticated"] = True
                 session["pending_login_user"] = None
-                log_step(call_id, phone, step, "******", f"סיסמא תקינה (ת.ז {get_user_id(user)}) ➔ כניסה")
+                log_step(call_id, phone, step, "******", f"סיסמא תקינה (ת.ז {get_user_id(user)}) ➔ כניסה להזמנות")
                 background_tasks.add_task(log_general_event, call_id, phone, "כניסה מוצלחת", f"התחבר ת.ז {get_user_id(user)}")
 
                 target = session.get("auth_target", "MAIN_MENU")
@@ -1673,7 +1742,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             if user_input == "1":
                 session["step"] = "REG_COMMUNITY_CODE"
                 log_step(call_id, phone, step, "1", "בחירה להקיש קוד קהילה")
-                return yemot_read("אנא הקישו את קוד הקהילה שלכם בן 6 ספרות ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית", "reg_community_code", opts_digits_confirm(6, 1, 7, allow_star=True), "012")
+                return yemot_read("אנא הקישו את קוד הקהילה שלכם ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית", "reg_community_code", opts_digits_confirm(9, 1, 7, allow_star=True), "012")
             elif user_input == "2":
                 session["reg_data"]["community_code"] = ""
                 log_step(call_id, phone, step, "2", "דילוג על קוד קהילה ➔ מעבר לשלוחה /C")
@@ -1687,11 +1756,11 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 return yemot_read("להקשת קוד קהילה הקישו 1, לדילוג הקישו 2, לחזרה הקישו כוכבית", "reg_community_choice", opts_menu())
 
             is_valid_code, comm_name_or_err = validate_community_code(user_input)
-            if not is_valid_code or len(user_input) != 6 or not user_input.isdigit():
+            if not is_valid_code:
                 log_step(call_id, phone, step, user_input, f"קוד קהילה לא תקין/מושבת ({comm_name_or_err})")
-                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב קוד בן 6 ספרות ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "reg_community_code", opts_digits_confirm(6, 1, 7, allow_star=True), "012")
+                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "reg_community_code", opts_digits_confirm(9, 1, 7, allow_star=True), "012")
 
-            session["reg_data"]["community_code"] = user_input
+            session["reg_data"]["community_code"] = normalize_code(user_input)
             log_step(call_id, phone, step, user_input, f"קוד קהילה אומת בהצלחה ({comm_name_or_err}) ➔ מעבר לשלוחה /C")
             return redirect_to_tzintuk_c(session, call_id, phone, "REG", request)
 
@@ -2120,7 +2189,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 return show_update_field_step(session, "UPD_PHONE_MENU")
             if user_input == "1":
                 session["step"] = "UPD_COMMUNITY_INPUT"
-                return yemot_read("אנא הקישו קוד קהילה חדש בן 6 ספרות ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "upd_comm_input", opts_digits_confirm(6, 1, 7, allow_star=True), "015")
+                return yemot_read("אנא הקישו קוד קהילה חדש ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "upd_comm_input", opts_digits_confirm(9, 1, 7, allow_star=True), "015")
             elif user_input == "2":
                 return show_update_field_step(session, "UPD_PASS_MENU")
             return show_update_field_step(session, "UPD_COMMUNITY_MENU", prefix="הקשה שגויה, ")
@@ -2130,15 +2199,16 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 return show_update_field_step(session, "UPD_COMMUNITY_MENU")
 
             is_valid_code, comm_name_or_err = validate_community_code(user_input)
-            if not is_valid_code or len(user_input) != 6 or not user_input.isdigit():
-                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב קוד בן 6 ספרות ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(6, 1, 7, allow_star=True), "015")
+            if not is_valid_code:
+                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(9, 1, 7, allow_star=True), "015")
 
             user = session["user"]
-            user["community_code"] = user_input
-            user["קוד קהילה"] = user_input
+            norm_c = normalize_code(user_input)
+            user["community_code"] = norm_c
+            user["קוד קהילה"] = norm_c
             sync_user_in_cache(user)
             background_tasks.add_task(update_user_in_sheet, dict(user))
-            log_step(call_id, phone, step, user_input, f"קוד קהילה עודכן בהצלחה ({comm_name_or_err})")
+            log_step(call_id, phone, step, norm_c, f"קוד קהילה עודכן בהצלחה ({comm_name_or_err})")
             return show_update_field_step(session, "UPD_PASS_MENU", prefix=f"קוד הקהילה עודכן בהצלחה ושויכתם ל{clean_tts(comm_name_or_err)}, ")
 
         elif step == "UPD_PASS_MENU":
@@ -2259,5 +2329,8 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}\n{traceback.format_exc()}", flush=True)
         return show_welcome(SESSIONS.get(call_id, {}), prefix="אירעה שגיאה זמנית, ")
+
+
+
 
 
