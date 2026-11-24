@@ -1,3 +1,16 @@
+צודק, זו הייתה תקלת שגיאת כתיב קטנה בקוד בשם הפונקציה: בפונקציות
+save_pending_tzintuk ו-pop_pending_tzintuk נכתב בטעות _save_pending_file
+ו-_load_pending_file במקום _save_json_file(PENDING_FILE, disk)
+ו-_load_json_file(PENDING_FILE).
+
+תוכל לראות גם בלוג ששלחת שהתקשורת מול ימות המשיח עבדה מצוין (UpdateExtension
+ivr2:/D ו-ivr2:/C החזירו שניהם OK) – ורק השורה הזו עצרה את המעבר.
+
+בנוסף, הוספתי תיקון הגנתי קטן ב-get_product_price_for_user למקרה שיש שורה
+בגיליון המוצרים שהמחיר בה הושאר ריק (כמו שורה 10–11 בצילום שלך), כך שלא יזרוק
+שגיאה אם מישהו ינסה להזמין ממנה.
+
+להלן קובץ ה-Python המלא והמתוקן (פשוט להחליף את main.py ולבצע Deploy):
 
 import os
 import json
@@ -265,7 +278,7 @@ def save_pending_tzintuk(call_id: str, phone: str, return_type: str, session: di
     if phone:
         PENDING_TZINTUK[f"ph:{phone}"] = record
         disk[f"ph:{phone}"] = record
-    _save_pending_file(disk)
+    _save_json_file(PENDING_FILE, disk)
 
 def pop_pending_tzintuk(call_id: str, phone: str) -> Optional[dict]:
     now = datetime.now().timestamp()
@@ -291,7 +304,7 @@ def pop_pending_tzintuk(call_id: str, phone: str) -> Optional[dict]:
     for k in keys:
         PENDING_TZINTUK.pop(k, None)
         disk.pop(k, None)
-    _save_pending_file(disk)
+    _save_json_file(PENDING_FILE, disk)
 
     if found and (now - found.get("timestamp", 0)) <= 600:
         return found
@@ -400,7 +413,7 @@ def clean_tts(text: str) -> str:
 
 def format_price(val) -> str:
     try:
-        num = float(str(val).replace("₪", "").strip())
+        num = float(str(val or "0").replace("₪", "").strip() or "0")
         return str(int(num)) if num.is_integer() else f"{num:.2f}"
     except Exception:
         return clean_tts(str(val))
@@ -433,7 +446,7 @@ def normalize_code(val: Any) -> str:
     return digits
 
 def get_user_id(user: dict) -> str:
-    return str(get_field(user, "תעודת זהות", "ת.ז", "id_number", "id") or get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
+    return str(get_field(user, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "id_number", "id") or get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
 
 def get_user_phone(user: dict) -> str:
     return str(get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
@@ -479,18 +492,12 @@ def validate_community_code(code: str) -> tuple[bool, str]:
     return False, "קוד לא תקין"
 
 def has_community_discount(user: Optional[dict]) -> bool:
-    """
-    בודק האם למשתמש יש זכאות למחיר קהילה:
-    1. קוד קהילה תקין בכרטיס המשתמש, או
-    2. תעודת הזהות של המשתמש מופיעה בעמודת 'תעודת זהות' בטבלת 'קודי קהילה'.
-    """
     if not user:
         return False
 
     u_id = normalize_code(get_user_id(user))
     u_code = normalize_code(get_user_community(user))
 
-    # 1. בדיקה לפי קוד קהילה
     if u_code and u_code not in ["0", "000000"]:
         if CACHE.get("community_codes"):
             for raw_c, info in CACHE["community_codes"].items():
@@ -499,7 +506,6 @@ def has_community_discount(user: Optional[dict]) -> bool:
                     return bool(info.get("active", True))
         return True
 
-    # 2. בדיקה האם ת.ז של המשתמש מופיעה תחת עמודת תעודת זהות בקודי קהילה
     if u_id and CACHE.get("community_codes"):
         for raw_c, info in CACHE["community_codes"].items():
             owner_id = normalize_code(info.get("owner", ""))
@@ -512,8 +518,8 @@ def has_community_discount(user: Optional[dict]) -> bool:
     return False
 
 def get_product_price_for_user(product: dict, user: Optional[dict]) -> str:
-    regular_price = str(product.get("price", "0")).replace("₪", "").strip()
-    comm_price = str(product.get("community_price", "")).replace("₪", "").strip()
+    regular_price = str(product.get("price") or "0").replace("₪", "").strip() or "0"
+    comm_price = str(product.get("community_price") or "").replace("₪", "").strip()
 
     if regular_price.endswith(".0"): regular_price = regular_price[:-2]
     if comm_price.endswith(".0"): comm_price = comm_price[:-2]
@@ -567,7 +573,6 @@ def load_data_from_sheets():
         for cc in data.get("community_codes", []):
             code_val = normalize_code(get_field(cc, "קוד קהילה", "קוד הקהילה", "קוד", "code"))
             name_val = str(get_field(cc, "שם קהילה", "קהילה", "community_name", "name")).strip()
-            # קריאת תעודת הזהות מעמודה C בקודי קהילה
             owner_val = str(get_field(cc, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "מזהה", "פרטי זיהוי בעל הקוד", "פרטי זיהוי", "זיהוי", "איש קשר", "owner", "id_number", "id")).strip()
             is_act = str(get_field(cc, "פעיל", "is_active", default="TRUE")).upper() in ["TRUE", "1", "YES", "כן"]
             if code_val:
@@ -606,8 +611,7 @@ def load_data_from_sheets():
                 p_sku = str(get_field(p, "מקט", "מק\"ט", "מזהה מוצר", "מזהה", "sku")).strip()
                 p_name = str(get_field(p, "שם מוצר", "שם המוצר", "שם", "מוצר", "name", "product_name")).strip()
                 p_price = str(get_field(p, "מחיר ליחידה", "מחיר מוצר", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
-                
-                # קריאת עמודה D ("מחיר לקהילות") שמופיעה בין מחיר ליחידה להערות
+
                 p_community_price = str(get_field(p, "מחיר לקהילות", "מחיר קהילות", "מחיר קהילה", "מחיר לקהילה", "מחיר קהילתי", "מחיר מוזל", "הנחת קהילה", "community_price", "comm_price")).strip()
                 if not p_community_price:
                     for k, v in p.items():
@@ -905,7 +909,7 @@ def process_gabai_message(rec_path: str, caller_phone: str, user: Optional[dict]
     })
 
 # -------------------------------------------------------------------
-# 4. פונקציות עזר לפורמט read= של ימות המשיח
+# 4. פונקציות מענה לימות המשיח
 # -------------------------------------------------------------------
 def opts_menu(max_d: int = 1, min_d: int = 1, sec: int = 7, allow_star: bool = True) -> str:
     block_star = "no" if allow_star else "yes"
@@ -1220,7 +1224,7 @@ def start_forgot_password(session: dict, background_tasks: BackgroundTasks) -> R
     return yemot_read(msg, "forgot_otp_input", opts_menu(6, 1, 15, allow_star=True))
 
 # -------------------------------------------------------------------
-# 6. Webhook ראשי
+# 6. נתיבי ה-Webhook (שלוחה ראשית / ושלוחה /D לחזרה מצינתוק)
 # -------------------------------------------------------------------
 @app.api_route("/tzintuk-done", methods=["GET", "POST", "HEAD"])
 async def tzintuk_done_handler(request: Request, background_tasks: BackgroundTasks):
@@ -1384,7 +1388,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             else:
                 msg = (
-                    "הקשה שגויה. המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא הושלמה. "
+                    "הקשה שגויה. המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא שולמה. "
                     "למעבר להמשך ההזמנה הקישו 1, לשמירת ההזמנה במצב המתנה עד לכניסה הבאה למערכת ההזמנות הקישו 2, למחיקת ההזמנה הקישו 3"
                 )
                 return yemot_read(msg, "entry_cart_choice", opts_menu(1, 1, 7, allow_star=False))
@@ -1400,7 +1404,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                     session["step"] = "ENTRY_ABANDONED_CART_CHOICE"
                     log_step(call_id, phone, "WELCOME", "", "זוהתה עסקה פעילה שלא שולמה בכניסה ➔ שאלת המשך/המתנה/מחיקה")
                     msg = (
-                        "המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא הושלמה. "
+                        "המערכת מזהה כי ישנה עיסקה פעילה במערכת שעדיין לא שולמה. "
                         "למעבר להמשך ההזמנה הקישו 1, לשמירת ההזמנה במצב המתנה עד לכניסה הבאה למערכת ההזמנות הקישו 2, למחיקת ההזמנה הקישו 3"
                     )
                     return yemot_read(msg, "entry_cart_choice", opts_menu(1, 1, 7, allow_star=False))
