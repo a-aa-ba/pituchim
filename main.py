@@ -10,7 +10,7 @@ import subprocess
 import traceback
 import urllib.parse
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from email.message import EmailMessage
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import Response
@@ -105,6 +105,7 @@ STEP_PARAM_MAP = {
     "KASHRUT_MENU": ["kashrut_choice", "ApiRealAnswer"],
     "PRODUCT_LIST_MENU": ["prod_list_choice", "ApiRealAnswer"],
     "PRODUCT_LOOP": ["product_choice", "ApiRealAnswer"],
+    "ATTR_INPUT": ["attr_input", "ApiRealAnswer"],
     "QTY_INPUT": ["qty_input", "ApiRealAnswer"],
     "AFTER_ADD_MENU": ["after_add_choice", "ApiRealAnswer"],
     "CONFIRM_CHECKOUT_FEE": ["checkout_confirm_choice", "ApiRealAnswer"],
@@ -380,7 +381,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
                 except: pass
 
 # -------------------------------------------------------------------
-# 2. עזר, ניקוי, אימות קהילה קשיח וניהול נתונים מ-Sheets
+# 2. עזר, ניקוי, אימות קהילה, מאפיינים וניהול נתונים מ-Sheets
 # -------------------------------------------------------------------
 def clean_input(val: str) -> str:
     if not val:
@@ -434,6 +435,55 @@ def normalize_code(val: Any) -> str:
     digits = "".join(ch for ch in s if ch.isdigit())
     return digits
 
+def parse_product_attributes(attr_str: str) -> List[dict]:
+    """
+    מפענח את עמודת המאפיינים מהשיטס.
+    תומך בטווחים (14-17) או רשימות (14, 15, 16, 17 | כותנה, לייקרה)
+    """
+    if not attr_str or not isinstance(attr_str, str):
+        return []
+
+    raw_parts = [p.strip() for p in attr_str.replace(";", "|").split("|") if p.strip()]
+    attributes = []
+
+    for part in raw_parts:
+        if ":" in part:
+            attr_name, options_str = part.split(":", 1)
+            attr_name = attr_name.strip()
+            options_str = options_str.strip()
+        else:
+            options_str = part.strip()
+            attr_name = "מידה" if any(ch.isdigit() for ch in options_str) else "סוג"
+
+        options = []
+        # תמיכה בטווח כמו 14-17
+        if "-" in options_str and "," not in options_str:
+            sub = options_str.split("-")
+            if len(sub) == 2 and sub[0].strip().isdigit() and sub[1].strip().isdigit():
+                start, end = int(sub[0].strip()), int(sub[1].strip())
+                if start <= end and (end - start) <= 60:
+                    options = [str(n) for n in range(start, end + 1)]
+
+        if not options:
+            options = [opt.strip() for opt in options_str.split(",") if opt.strip()]
+
+        if not options:
+            continue
+
+        is_numeric = all(opt.isdigit() for opt in options)
+        min_len = min(len(opt) for opt in options) if is_numeric else 1
+        max_len = max(len(opt) for opt in options) if is_numeric else 1
+
+        attributes.append({
+            "name": attr_name,
+            "is_numeric": is_numeric,
+            "options": options,
+            "min_len": min_len,
+            "max_len": max_len
+        })
+
+    return attributes
+
 def get_user_id(user: dict) -> str:
     return str(get_field(user, "תעודת זהות", "ת.ז", "ת.ז.", "תז", "id_number", "id") or get_field(user, "מספר טלפון", "טלפון", "phone")).strip()
 
@@ -463,7 +513,6 @@ def is_user_personal_tzintuk(user: dict) -> bool:
     return val in ["TRUE", "1", "YES", "כן"]
 
 def find_community_record(code: str) -> Optional[dict]:
-    """מחפש קוד קהילה בטבלת קודי קהילה שבשיטס (תומך באפסים מובילים)"""
     clean_c = normalize_code(code)
     if not clean_c or clean_c in ["0", "000000"]:
         return None
@@ -474,12 +523,6 @@ def find_community_record(code: str) -> Optional[dict]:
     return None
 
 def validate_community_code(code: str) -> tuple[bool, str]:
-    """
-    אימות קשיח מול גיליון 'קודי קהילה' בלבד:
-    1. הקוד חייב להיות מוגדר בגיליון 'קודי קהילה'.
-    2. לקוד חייבת להיות קהילה משויכת (עמודת 'שם קהילה' לא ריקה).
-    3. השורה חייבת להיות פעילה (TRUE).
-    """
     clean_c = normalize_code(code)
     if not clean_c or clean_c in ["0", "000000"]:
         return False, "קוד ריק"
@@ -498,11 +541,6 @@ def validate_community_code(code: str) -> tuple[bool, str]:
     return True, info["name"]
 
 def has_community_discount(user: Optional[dict]) -> bool:
-    """
-    בדיקת זכאות למחיר לקהילות:
-    1. קוד הקהילה של המשתמש חייב להיות מוגדר, פעיל ומשויך לקהילה בגיליון 'קודי קהילה'.
-    2. או שתעודת הזהות של המשתמש מופיעה כבעל קוד פעיל ומשויך לקהילה בגיליון 'קודי קהילה'.
-    """
     if not user:
         return False
 
@@ -615,33 +653,55 @@ def load_data_from_sheets():
 
         prods = []
         for p in data.get("products", []):
-            in_stock = str(get_field(p, "במלאי", "מלאי", "in_stock", default="TRUE")).upper()
-            if in_stock in ["TRUE", "1", "YES", "כן"]:
-                p_sku = str(get_field(p, "מקט", "מק\"ט", "מזהה מוצר", "מזהה", "sku")).strip()
-                p_name = str(get_field(p, "שם מוצר", "שם המוצר", "שם", "מוצר", "name", "product_name")).strip()
-                p_price = str(get_field(p, "מחיר ליחידה", "מחיר מוצר", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
+            p_sku = str(get_field(p, "מקט", "מק\"ט", "מזהה מוצר", "מזהה", "sku")).strip()
+            p_name = str(get_field(p, "שם מוצר", "שם המוצר", "שם", "מוצר", "name", "product_name")).strip()
+            p_price = str(get_field(p, "מחיר ליחידה", "מחיר מוצר", "מחיר", "מחיר יחידה", "price", "unit_price")).strip()
 
-                p_community_price = str(get_field(p, "מחיר לקהילות", "מחיר קהילות", "מחיר קהילה", "מחיר לקהילה", "מחיר קהילתי", "מחיר מוזל", "הנחת קהילה", "community_price", "comm_price")).strip()
-                if not p_community_price:
-                    for k, v in p.items():
-                        clean_k = str(k).strip()
-                        if "קהיל" in clean_k and str(v).strip():
-                            p_community_price = str(v).strip()
-                            break
+            p_community_price = str(get_field(p, "מחיר לקהילות", "מחיר קהילות", "מחיר קהילה", "מחיר לקהילה", "מחיר קהילתי", "מחיר מוזל", "הנחת קהילה", "community_price", "comm_price")).strip()
+            if not p_community_price:
+                for k, v in p.items():
+                    clean_k = str(k).strip()
+                    if "קהיל" in clean_k and str(v).strip():
+                        p_community_price = str(v).strip()
+                        break
 
-                p_notes = str(get_field(p, "הערות", "הערה", "notes", "description")).strip()
-                p_cat = str(get_field(p, "קטגוריה", "שם קטגוריה", "category_name", "category")).strip()
-                p_kashrut = str(get_field(p, "כשרות", "כשרויות", "kashrut")).strip()
-                if p_name:
-                    prods.append({
-                        "sku": p_sku,
-                        "name": p_name,
-                        "price": p_price,
-                        "community_price": p_community_price,
-                        "notes": p_notes,
-                        "category_name": p_cat,
-                        "kashrut": p_kashrut
-                    })
+            p_notes = str(get_field(p, "הערות", "הערה", "notes", "description")).strip()
+            p_cat = str(get_field(p, "קטגוריה", "שם קטגוריה", "category_name", "category")).strip()
+            p_kashrut = str(get_field(p, "כשרות", "כשרויות", "kashrut")).strip()
+
+            # בדיקת מלאי
+            in_stock_flag = str(get_field(p, "במלאי", "in_stock", default="TRUE")).strip().upper()
+            stock_qty_raw = str(get_field(p, "כמות במלאי", "כמות", "stock_qty", "stock")).strip()
+            is_out_of_stock = False
+            stock_qty = None
+
+            if in_stock_flag in ["FALSE", "0", "לא", "אזל", "אזל מהמלאי", "NO"]:
+                is_out_of_stock = True
+            elif stock_qty_raw:
+                try:
+                    stock_qty = int(float(stock_qty_raw))
+                    if stock_qty <= 0:
+                        is_out_of_stock = True
+                except ValueError:
+                    pass
+
+            # פענוח מאפיינים ותתי-סוגים (מידות, סוג בד וכו')
+            attr_str = str(get_field(p, "מאפיינים", "אפשרויות", "סוגים", "attributes", "options")).strip()
+            parsed_attributes = parse_product_attributes(attr_str)
+
+            if p_name:
+                prods.append({
+                    "sku": p_sku,
+                    "name": p_name,
+                    "price": p_price,
+                    "community_price": p_community_price,
+                    "notes": p_notes,
+                    "category_name": p_cat,
+                    "kashrut": p_kashrut,
+                    "is_out_of_stock": is_out_of_stock,
+                    "stock_qty": stock_qty,
+                    "attributes": parsed_attributes
+                })
         CACHE["products"] = prods
 
         txs = []
@@ -675,7 +735,7 @@ async def refresh_cache():
         "community_codes_count": len(CACHE["community_codes"]),
         "community_codes": CACHE["community_codes"],
         "products_count": len(CACHE["products"]),
-        "sample_product_with_community_price": sample_comm_prod,
+        "sample_product": sample_comm_prod,
         "cities_count": len(CACHE["cities"]),
         "transactions_count": len(CACHE["transactions"])
     }
@@ -747,6 +807,12 @@ def log_transaction_to_sheet(session_data: dict):
     }
     CACHE["transactions"].append(tx_record)
     post_to_apps_script(tx_record)
+
+    # עדכון מלאי בשיטס עבור מוצרים שנקנו
+    post_to_apps_script({
+        "type": "decrement_stock",
+        "items": [{"sku": i["sku"], "qty": i["qty"]} for i in cart]
+    })
 
 def log_incomplete_transaction_to_sheet(session_data: dict):
     user = session_data.get("user") or {}
@@ -1062,31 +1128,107 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
 
     p_name = clean_tts(p["name"])
     p_sku = clean_tts(p["sku"])
-    effective_price = get_product_price_for_user(p, session.get("user"))
-    p_price = format_price(effective_price)
-    p_notes = clean_tts(p["notes"]) if p.get("notes") else ""
+    reg_price_str = format_price(p.get("price") or "0")
 
+    user = session.get("user")
+    effective_price = get_product_price_for_user(p, user)
+    comm_price_raw = str(p.get("community_price") or "").replace("₪", "").strip()
+    if comm_price_raw.endswith(".0"):
+        comm_price_raw = comm_price_raw[:-2]
+
+    show_discount = False
+    comm_price_str = ""
+    if has_community_discount(user) and comm_price_raw:
+        try:
+            if float(comm_price_raw) > 0:
+                show_discount = True
+                comm_price_str = format_price(effective_price)
+        except ValueError:
+            pass
+
+    p_notes = clean_tts(p["notes"]) if p.get("notes") else ""
     notes_str = f" הערה: {p_notes}," if p_notes else ""
-    msg = (
-        f"{clean_tts(prefix)}מוצר {p_name}, מקט {p_sku}, "
-        f"מחיר המוצר {p_price} שקלים,{notes_str} "
-        f"להוספת המוצר לסל הקישו 1, למוצר הבא הקישו 2 או המתינו, למעבר לקטגוריות הקישו 3, לתשלום הקישו 9, לחזרה לרשימת המוצרים הקישו כוכבית"
-    )
-    sound_chain = f"t-{msg}"
-    if USE_AUDIO_FILES:
-        sound_chain = (
-            f"{f't-{clean_tts(prefix)}.' if prefix else ''}"
-            f"f-/{AUDIO_FOLDER}/022a.t-מוצר.t-{p_name}."
-            f"f-/{AUDIO_FOLDER}/022b.t-מקט.t-{p_sku}."
-            f"f-/{AUDIO_FOLDER}/022c.t-מחיר המוצר.n-{p_price}."
-            f"f-/{AUDIO_FOLDER}/022d.t-שקלים."
-            + (f"f-/{AUDIO_FOLDER}/022e.t-הערה.t-{p_notes}." if p_notes else "")
-            + f"f-/{AUDIO_FOLDER}/022f.t-להוספת המוצר לסל הקישו 1, למוצר הבא הקישו 2 או המתינו, למעבר לקטגוריות הקישו 3, לתשלום הקישו 9, לחזרה הקישו כוכבית"
+
+    if p.get("is_out_of_stock"):
+        msg = f"{clean_tts(prefix)}מוצר {p_name}, מקט {p_sku}, {notes_str} מוצר זה אזל מהמלאי. למוצר הבא הקישו סולמית בלבד, לחזרה הקישו כוכבית"
+    else:
+        if show_discount:
+            price_phrase = f"מחיר {reg_price_str} שקלים, הנחה לחברי הקהילה {comm_price_str} שקלים"
+        else:
+            price_phrase = f"מחיר המוצר {reg_price_str} שקלים"
+
+        msg = (
+            f"{clean_tts(prefix)}מוצר {p_name}, מקט {p_sku}, "
+            f"{price_phrase},{notes_str} "
+            f"להוספה לסל הקישו את כמות היחידות להזמנה וסולמית לסיום, למוצר הבא הקישו סולמית בלבד, לחזרה הקישו כוכבית"
         )
 
+    sound_chain = f"t-{msg}"
     session["step"] = "PRODUCT_LOOP"
-    options = "no,1,1,5,No,no,no,,,1,Ok,TIMEOUT,,no"
+    options = "no,3,1,7,No,no,no,,,1,Ok,NEXT,,no"
     return Response(content=f"read={sound_chain}=product_choice,{options}&rate=3&tts_rate=3", media_type="text/plain; charset=utf-8")
+
+def ask_product_attribute(session: dict, prefix: str = "") -> Response:
+    products = session.get("filtered_products", [])
+    p = products[session.get("product_index", 0)]
+    attrs = p.get("attributes", [])
+    idx = session.get("attr_index", 0)
+
+    if idx >= len(attrs):
+        # כל המאפיינים נבחרו - הוספה סופית לסל
+        return add_product_to_cart_final(session)
+
+    attr = attrs[idx]
+    attr_name = clean_tts(attr["name"])
+    session["step"] = "ATTR_INPUT"
+
+    if attr["is_numeric"]:
+        # הקשה ישירה של מספר (כמו מידה)
+        msg = f"{prefix}אנא הקישו את ה{attr_name} הרצויה ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית"
+        opts = opts_digits_no_confirm(max_d=max(attr["max_len"], 3), min_d=1, allow_star=True)
+        return yemot_read(msg, "attr_input", opts)
+    else:
+        # תפריט בחירה רגיל (סוג בד, צווארון וכדו')
+        menu_text = "".join([f"ל{opt} הקישו {i}, " for i, opt in enumerate(attr["options"], 1)])
+        msg = f"{prefix}אנא בחרו {attr_name}: {menu_text} לחזרה הקישו כוכבית"
+        max_d = max(1, len(str(len(attr["options"]))))
+        return yemot_read(msg, "attr_input", opts_menu(max_d, 1, 7, allow_star=True))
+
+def add_product_to_cart_final(session: dict) -> Response:
+    products = session.get("filtered_products", [])
+    p = products[session.get("product_index", 0)]
+    qty = session.get("pending_qty", 1)
+    effective_price = get_product_price_for_user(p, session.get("user"))
+    item_total = qty * float(effective_price)
+
+    selected_attrs = session.get("selected_attrs", {})
+    if selected_attrs:
+        attrs_str = ", ".join([f"{k}: {v}" for k, v in selected_attrs.items()])
+        full_display_name = f"{p['name']} ({attrs_str})"
+    else:
+        full_display_name = p["name"]
+
+    session["cart"].append({
+        "sku": p["sku"],
+        "name": full_display_name,
+        "qty": qty,
+        "total": item_total
+    })
+
+    user = session.get("user") or {}
+    user_id = get_user_id(user) or session.get("phone", "")
+    save_abandoned_cart(user_id, session.get("phone", ""), session["cart"], user if user else None)
+
+    log_step(session.get("call_id", ""), session.get("phone", ""), "ADD_TO_CART", str(qty), f"נוסף לסל: {full_display_name} x{qty} (מחיר: {effective_price}, סה\"כ: {format_price(item_total)})")
+    cart_total = sum(float(i["total"]) for i in session["cart"])
+
+    session["step"] = "AFTER_ADD_MENU"
+    msg = (
+        f"המוצר נוסף לסל, המחיר הכולל עבור מוצר זה הינו {format_price(item_total)} שקלים, "
+        f"סך הכל בסל הקניות {format_price(cart_total)} שקלים. "
+        "למוצר הבא הקישו 1, לבחירת קטגוריה אחרת הקישו 2, למעבר לתשלום הקישו 9, לחזרה למוצר הקישו כוכבית"
+    )
+    return yemot_read(msg, "after_add_choice", opts_menu(), "022g")
 
 def initiate_checkout(session: dict) -> Response:
     cart = session.get("cart", [])
@@ -1296,6 +1438,9 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 "available_kashruts": [],
                 "filtered_products": [],
                 "product_index": 0,
+                "pending_qty": 1,
+                "attr_index": 0,
+                "selected_attrs": {},
                 "call_id": call_id,
                 "phone": phone,
                 "reg_data": {},
@@ -1305,7 +1450,6 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             }
             log_step(call_id, phone, "NEW_CALL", "", "פתיחת שיחה חדשה")
             background_tasks.add_task(log_general_event, call_id, phone, "כניסה לשיחה", "התחלת שיחה חדשה")
-            # רענון אוטומטי ברקע אם עברה יותר מדקה מהטעינה האחרונה
             if time.time() - CACHE.get("last_loaded", 0.0) > 60:
                 background_tasks.add_task(load_data_from_sheets)
 
@@ -1487,7 +1631,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             if not user_input or not user_input.isdigit() or len(user_input) < 8 or len(user_input) > 9:
                 log_step(call_id, phone, step, user_input, "ת.ז לא תקינה -> בקשה חוזרת")
-                return yemot_read("אנא הקישו מספר תעודת זהות תקין בן 8 עד 9 ספרות ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
+                return yemot_read("אנא הקישו מספר תעודת זהות תקין בן 8 עד 9 ספרות ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
 
             if user_input in CACHE["users"]:
                 user = CACHE["users"][user_input]
@@ -1539,7 +1683,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 session["user"] = user
                 session["orders_authenticated"] = True
                 session["pending_login_user"] = None
-                log_step(call_id, phone, step, "******", f"סיסמא תקינה (ת.ז {get_user_id(user)}) -> כניסה")
+                log_step(call_id, phone, step, "******", f"סיסמא תקינה (ת.ז {get_user_id(user)}) -> כניסה להזמנות")
                 background_tasks.add_task(log_general_event, call_id, phone, "כניסה מוצלחת", f"התחבר ת.ז {get_user_id(user)}")
 
                 target = session.get("auth_target", "MAIN_MENU")
@@ -1827,7 +1971,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             return yemot_read("הקשה שגויה. למעבר לתפריט ההזמנות הקישו 1, לחזרה לתפריט הראשי הקישו 2", "reg_end_choice", opts_menu(), "013")
 
         # ---------------------------------------------------------
-        # שחזור סל פתוח בשלוחה 2 (אחרי זיהוי + סיסמא)
+        # שחזור סל פתוח בשלוחה 2
         # ---------------------------------------------------------
         elif step == "RESTORE_CART_CHOICE":
             if is_back:
@@ -1951,65 +2095,96 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             if is_back:
                 log_step(call_id, phone, step, "*", "חזרה לרשימת המוצרים")
                 return show_category_products_menu(session)
-            if user_input == "9":
-                log_step(call_id, phone, step, "9", "מעבר לתשלום")
-                return initiate_checkout(session)
+
+            # סולמית בלבד או המתנה של 5 שניות עוברים למוצר הבא
+            if user_input in ["NEXT", "None", "", "ok"]:
+                products = session.get("filtered_products", [])
+                session["product_index"] = (session.get("product_index", 0) + 1) % len(products)
+                log_step(call_id, phone, step, "#", "הקשת סולמית בלבד / מעבר למוצר הבא")
+                return play_current_product(session)
 
             products = session.get("filtered_products", [])
             idx = session.get("product_index", 0)
+            p = products[idx]
 
-            if user_input == "1":
-                session["step"] = "QTY_INPUT"
-                p = products[idx]
-                log_step(call_id, phone, step, "1", f"בחירת כמות למוצר '{p['name']}'")
-                return yemot_read(
-                    f"אנא הקישו את כמות היחידות ממוצר {clean_tts(p['name'])} ולאחר מכן הקישו סולמית, לחזרה למוצר הקישו כוכבית וסולמית",
-                    "qty_input",
-                    opts_digits_no_confirm(3, 1, 7, allow_star=True),
-                    "020a"
-                )
-            elif user_input in ["2", "TIMEOUT", "ok", "None", ""]:
-                session["product_index"] = (idx + 1) % len(products)
-                log_step(call_id, phone, step, user_input or "TIMEOUT", "דילוג למוצר הבא")
-                return play_current_product(session)
-            elif user_input == "3":
-                log_step(call_id, phone, step, "3", "מעבר לקטגוריות")
-                return show_categories(session)
-            else:
-                return play_current_product(session, prefix="הקשה שגויה, ")
-
-        elif step == "QTY_INPUT":
-            if is_back:
-                log_step(call_id, phone, step, "*", "חזרה לפרטי המוצר")
-                return play_current_product(session)
+            # הקשת כמות יחידות ישירות מהמוצר
             try:
                 qty = int(user_input)
                 if qty <= 0:
-                    return yemot_read("כמות חייבת להיות גדולה מאפס, אנא הקש כמות תקינה ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "qty_input", opts_digits_no_confirm(3, 1, 7, allow_star=True), "020b")
+                    return play_current_product(session, prefix="כמות חייבת להיות גדולה מאפס. ")
 
-                p = session["filtered_products"][session["product_index"]]
-                effective_price = get_product_price_for_user(p, session.get("user"))
-                item_total = qty * float(effective_price)
-                session["cart"].append({"sku": p["sku"], "name": p["name"], "qty": qty, "total": item_total})
+                if p.get("is_out_of_stock"):
+                    log_step(call_id, phone, step, str(qty), "ניסיון הזמנה של מוצר שאזל מהמלאי")
+                    return play_current_product(session, prefix="מוצר זה אזל מהמלאי ולא ניתן להזמין ממנו. ")
 
-                user = session.get("user") or {}
-                user_id = get_user_id(user) or phone
-                save_abandoned_cart(user_id, phone, session["cart"], user if user else None)
+                if p.get("stock_qty") is not None and qty > p["stock_qty"]:
+                    log_step(call_id, phone, step, str(qty), f"כמות מבוקשת גדולה מהמלאי ({p['stock_qty']})")
+                    return play_current_product(session, prefix=f"הכמות המבוקשת אינה קיימת במלאי, נותרו במלאי {p['stock_qty']} יחידות בלבד. ")
 
-                log_step(call_id, phone, step, str(qty), f"נוסף לסל: {p['name']} x{qty} (מחיר יח': {effective_price}, סה\"כ: {format_price(item_total)})")
-                background_tasks.add_task(log_general_event, call_id, phone, "הוספה לסל", f"{p['name']} x {qty} (מחיר ליח': {effective_price})")
-                cart_total = sum(float(i["total"]) for i in session["cart"])
+                session["pending_qty"] = qty
+                attrs = p.get("attributes", [])
 
-                session["step"] = "AFTER_ADD_MENU"
-                msg = (
-                    f"המוצר נוסף לסל, המחיר הכולל עבור מוצר זה הינו {format_price(item_total)} שקלים, "
-                    f"סך הכל בסל הקניות {format_price(cart_total)} שקלים. "
-                    "למוצר הבא הקישו 1, לבחירת קטגוריה אחרת הקישו 2, למעבר לתשלום הקישו 9, לחזרה למוצר הקישו כוכבית"
-                )
-                return yemot_read(msg, "after_add_choice", opts_menu(), "022g")
+                if attrs:
+                    # למוצר יש תתי-מאפיינים (מידות, סוג בד וכו')
+                    session["attr_index"] = 0
+                    session["selected_attrs"] = {}
+                    log_step(call_id, phone, step, str(qty), f"נקלטה כמות {qty} למוצר עם מאפיינים ➔ מעבר לבחירת מאפיין ראשון ({attrs[0]['name']})")
+                    return ask_product_attribute(session)
+                else:
+                    # מוצר רגיל - הוספה ישירה לסל
+                    return add_product_to_cart_final(session)
+
             except ValueError:
-                log_step(call_id, phone, step, raw_user_input, "קלט כמות לא מספרי")
-                return yemot_read("הקשה שגויה, אנא הקש כמות במספרים בלבד ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "qty_input", opts_digits_no_confirm(3, 1, 7, allow_star=True), "021")
+                log_step(call_id, phone, step, raw_user_input, "קלט לא תקין במוצר")
+                return play_current_product(session, prefix="הקשה שגויה. ")
+
+        # ---------------------------------------------------------
+        # בחירת מאפיינים למוצר מורכב (מידה ישירה במספרים, או תפריט)
+        # ---------------------------------------------------------
+        elif step == "ATTR_INPUT":
+            products = session.get("filtered_products", [])
+            p = products[session.get("product_index", 0)]
+            attrs = p.get("attributes", [])
+            idx = session.get("attr_index", 0)
+            attr = attrs[idx]
+
+            if is_back:
+                if idx > 0:
+                    session["attr_index"] = idx - 1
+                    # מחיקת הבחירה הקודמת
+                    prev_name = attrs[idx - 1]["name"]
+                    session["selected_attrs"].pop(prev_name, None)
+                    log_step(call_id, phone, step, "*", f"חזרה למאפיין הקודם ({prev_name})")
+                    return ask_product_attribute(session)
+                else:
+                    log_step(call_id, phone, step, "*", "חזרה לדף המוצר")
+                    return play_current_product(session)
+
+            if attr["is_numeric"]:
+                # הקשה ישירה של מספר (כגון מידה 14-17)
+                typed_val = user_input
+                if typed_val in attr["options"]:
+                    session["selected_attrs"][attr["name"]] = typed_val
+                    session["attr_index"] = idx + 1
+                    log_step(call_id, phone, step, typed_val, f"נבחרה {attr['name']} {typed_val}")
+                    return ask_product_attribute(session)
+                else:
+                    log_step(call_id, phone, step, typed_val, f"המידה {typed_val} אינה במלאי (קיימות: {attr['options']})")
+                    err_msg = f"מוצר זה אינו קיים במלאי ב{clean_tts(attr['name'])} {typed_val}. "
+                    return ask_product_attribute(session, prefix=err_msg)
+            else:
+                # בחירה מתוך תפריט (כותנה, לייקרה וכו')
+                try:
+                    choice_opt_idx = int(user_input) - 1
+                    if 0 <= choice_opt_idx < len(attr["options"]):
+                        chosen_opt = attr["options"][choice_opt_idx]
+                        session["selected_attrs"][attr["name"]] = chosen_opt
+                        session["attr_index"] = idx + 1
+                        log_step(call_id, phone, step, user_input, f"נבחר {attr['name']}: {chosen_opt}")
+                        return ask_product_attribute(session)
+                    return ask_product_attribute(session, prefix="הקשה שגויה. ")
+                except ValueError:
+                    return ask_product_attribute(session, prefix="הקשה שגויה. ")
 
         elif step == "AFTER_ADD_MENU":
             if is_back:
@@ -2217,7 +2392,6 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             is_valid_code, comm_name_or_err = validate_community_code(user_input)
             if not is_valid_code:
-                log_step(call_id, phone, step, user_input, f"קוד קהילה נדחה ({comm_name_or_err})")
                 return yemot_read("קוד הקהילה שהוקש אינו מוגדר או שאינו משויך לקהילה פעילה במערכת. אנא הקישו קוד תקין ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(9, 1, 7, allow_star=True), "015")
 
             user = session["user"]
