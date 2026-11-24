@@ -1,5 +1,7 @@
+
 import os
 import json
+import time
 import base64
 import random
 import smtplib
@@ -66,7 +68,8 @@ CACHE = {
     "categories": [],
     "products": [],
     "transactions": [],
-    "cities": []
+    "cities": [],
+    "last_loaded": 0.0
 }
 
 SESSIONS: Dict[str, Dict[str, Any]] = {}
@@ -377,7 +380,7 @@ def transcribe_audio_file_from_yemot(my_rec_path: str, token: str = None) -> str
                 except: pass
 
 # -------------------------------------------------------------------
-# 2. עזר, ניקוי, אימות קהילה וניהול נתונים מ-Sheets
+# 2. עזר, ניקוי, אימות קהילה קשיח וניהול נתונים מ-Sheets
 # -------------------------------------------------------------------
 def clean_input(val: str) -> str:
     if not val:
@@ -459,44 +462,62 @@ def is_user_personal_tzintuk(user: dict) -> bool:
     val = str(get_field(user, "צינתוק אישי", "רישום לצינתוק אישי", "personal_tzintuk", "tzintuk", default="FALSE")).upper()
     return val in ["TRUE", "1", "YES", "כן"]
 
+def find_community_record(code: str) -> Optional[dict]:
+    """מחפש קוד קהילה בטבלת קודי קהילה שבשיטס (תומך באפסים מובילים)"""
+    clean_c = normalize_code(code)
+    if not clean_c or clean_c in ["0", "000000"]:
+        return None
+    for raw_c, info in CACHE.get("community_codes", {}).items():
+        norm_c = normalize_code(raw_c)
+        if norm_c and (norm_c == clean_c or norm_c.zfill(6) == clean_c.zfill(6) or norm_c.lstrip("0") == clean_c.lstrip("0")):
+            return info
+    return None
+
 def validate_community_code(code: str) -> tuple[bool, str]:
+    """
+    אימות קשיח מול גיליון 'קודי קהילה' בלבד:
+    1. הקוד חייב להיות מוגדר בגיליון 'קודי קהילה'.
+    2. לקוד חייבת להיות קהילה משויכת (עמודת 'שם קהילה' לא ריקה).
+    3. השורה חייבת להיות פעילה (TRUE).
+    """
     clean_c = normalize_code(code)
     if not clean_c or clean_c in ["0", "000000"]:
         return False, "קוד ריק"
 
-    if CACHE.get("community_codes"):
-        for raw_c, info in CACHE["community_codes"].items():
-            norm_c = normalize_code(raw_c)
-            if norm_c and (norm_c == clean_c or norm_c.zfill(6) == clean_c.zfill(6) or norm_c.lstrip("0") == clean_c.lstrip("0")):
-                if not info.get("active", True):
-                    return False, "קוד מושבת"
-                return True, info.get("name") or "קהילה מאומתת"
+    if not CACHE.get("community_codes"):
+        return False, "לא נטענו קודי קהילה מהשיטס"
 
-    if 4 <= len(clean_c) <= 9 and clean_c.isdigit():
-        return True, "קהילה כללית"
+    info = find_community_record(clean_c)
+    if not info:
+        return False, "הקוד אינו מוגדר בגיליון קודי קהילה"
+    if not info.get("active", True):
+        return False, "קוד הקהילה מושבת"
+    if not info.get("name"):
+        return False, "לקוד זה לא משויכת קהילה בגיליון"
 
-    return False, "קוד לא תקין"
+    return True, info["name"]
 
 def has_community_discount(user: Optional[dict]) -> bool:
+    """
+    בדיקת זכאות למחיר לקהילות:
+    1. קוד הקהילה של המשתמש חייב להיות מוגדר, פעיל ומשויך לקהילה בגיליון 'קודי קהילה'.
+    2. או שתעודת הזהות של המשתמש מופיעה כבעל קוד פעיל ומשויך לקהילה בגיליון 'קודי קהילה'.
+    """
     if not user:
         return False
 
-    u_id = normalize_code(get_user_id(user))
     u_code = normalize_code(get_user_community(user))
-
     if u_code and u_code not in ["0", "000000"]:
-        if CACHE.get("community_codes"):
-            for raw_c, info in CACHE["community_codes"].items():
-                norm_c = normalize_code(raw_c)
-                if norm_c and (norm_c == u_code or norm_c.zfill(6) == u_code.zfill(6) or norm_c.lstrip("0") == u_code.lstrip("0")):
-                    return bool(info.get("active", True))
-        return True
+        valid, _ = validate_community_code(u_code)
+        if valid:
+            return True
 
+    u_id = normalize_code(get_user_id(user))
     if u_id and CACHE.get("community_codes"):
         for raw_c, info in CACHE["community_codes"].items():
             owner_id = normalize_code(info.get("owner", ""))
             if owner_id and (owner_id == u_id or owner_id.zfill(9) == u_id.zfill(9) or owner_id.lstrip("0") == u_id.lstrip("0")):
-                if info.get("active", True):
+                if info.get("active", True) and info.get("name"):
                     user["community_code"] = raw_c
                     user["קוד קהילה"] = raw_c
                     return True
@@ -635,6 +656,7 @@ def load_data_from_sheets():
                 "status": str(get_field(t, "סטטוס", "status"))
             })
         CACHE["transactions"] = txs
+        CACHE["last_loaded"] = time.time()
 
         print(f"[CACHE] נטענו: {len(CACHE['users'])} משתמשים | {len(comm_dict)} קודי קהילה | {len(cats)} קטגוריות | {len(cities)} ערים | {len(prods)} מוצרים | {len(txs)} עסקאות", flush=True)
     except Exception as e:
@@ -647,10 +669,13 @@ async def startup_event():
 @app.get("/refresh-cache")
 async def refresh_cache():
     load_data_from_sheets()
+    sample_comm_prod = next((p for p in CACHE["products"] if p.get("community_price")), None)
     return {
         "status": "success",
         "community_codes_count": len(CACHE["community_codes"]),
+        "community_codes": CACHE["community_codes"],
         "products_count": len(CACHE["products"]),
+        "sample_product_with_community_price": sample_comm_prod,
         "cities_count": len(CACHE["cities"]),
         "transactions_count": len(CACHE["transactions"])
     }
@@ -1280,6 +1305,9 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             }
             log_step(call_id, phone, "NEW_CALL", "", "פתיחת שיחה חדשה")
             background_tasks.add_task(log_general_event, call_id, phone, "כניסה לשיחה", "התחלת שיחה חדשה")
+            # רענון אוטומטי ברקע אם עברה יותר מדקה מהטעינה האחרונה
+            if time.time() - CACHE.get("last_loaded", 0.0) > 60:
+                background_tasks.add_task(load_data_from_sheets)
 
         session = SESSIONS[call_id]
         step = session["step"]
@@ -1746,8 +1774,8 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             is_valid_code, comm_name_or_err = validate_community_code(user_input)
             if not is_valid_code:
-                log_step(call_id, phone, step, user_input, f"קוד קהילה לא תקין/מושבת ({comm_name_or_err})")
-                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "reg_community_code", opts_digits_confirm(9, 1, 7, allow_star=True), "012")
+                log_step(call_id, phone, step, user_input, f"קוד קהילה נדחה ({comm_name_or_err})")
+                return yemot_read("קוד הקהילה שהוקש אינו מוגדר או שאינו משויך לקהילה פעילה במערכת. אנא הקישו קוד תקין ולאחר מכן סולמית, או הקישו כוכבית וסולמית לדילוג וחזרה", "reg_community_code", opts_digits_confirm(9, 1, 7, allow_star=True), "012")
 
             session["reg_data"]["community_code"] = normalize_code(user_input)
             log_step(call_id, phone, step, user_input, f"קוד קהילה אומת בהצלחה ({comm_name_or_err}) -> מעבר לשלוחה /C")
@@ -2189,7 +2217,8 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             is_valid_code, comm_name_or_err = validate_community_code(user_input)
             if not is_valid_code:
-                return yemot_read("קוד הקהילה שהוקש אינו מוכר או שאינו פעיל במערכת. אנא הקישו שוב ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(9, 1, 7, allow_star=True), "015")
+                log_step(call_id, phone, step, user_input, f"קוד קהילה נדחה ({comm_name_or_err})")
+                return yemot_read("קוד הקהילה שהוקש אינו מוגדר או שאינו משויך לקהילה פעילה במערכת. אנא הקישו קוד תקין ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(9, 1, 7, allow_star=True), "015")
 
             user = session["user"]
             norm_c = normalize_code(user_input)
@@ -2318,3 +2347,5 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}\n{traceback.format_exc()}", flush=True)
         return show_welcome(SESSIONS.get(call_id, {}), prefix="אירעה שגיאה זמנית, ")
+
+
