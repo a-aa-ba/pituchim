@@ -35,7 +35,7 @@ ALLOWED_PHONES_WHEN_CLOSED = [
     "0527123207"
 ]
 
-# 2. הקראה רובוטית בלבד בינתיים (False = TTS בלבד ללא קבצי הקלטה)
+# 2. הקראה רובוטית בלבד (False = TTS בלבד ללא קבצי הקלטה)
 USE_AUDIO_FILES = False
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
@@ -436,10 +436,6 @@ def normalize_code(val: Any) -> str:
     return digits
 
 def parse_product_attributes(attr_str: str) -> List[dict]:
-    """
-    מפענח את עמודת המאפיינים מהשיטס.
-    תומך בטווחים (14-17) או רשימות (14, 15, 16, 17 | כותנה, לייקרה)
-    """
     if not attr_str or not isinstance(attr_str, str):
         return []
 
@@ -456,7 +452,6 @@ def parse_product_attributes(attr_str: str) -> List[dict]:
             attr_name = "מידה" if any(ch.isdigit() for ch in options_str) else "סוג"
 
         options = []
-        # תמיכה בטווח כמו 14-17
         if "-" in options_str and "," not in options_str:
             sub = options_str.split("-")
             if len(sub) == 2 and sub[0].strip().isdigit() and sub[1].strip().isdigit():
@@ -523,6 +518,7 @@ def find_community_record(code: str) -> Optional[dict]:
     return None
 
 def validate_community_code(code: str) -> tuple[bool, str]:
+    """אימות קשיח מול גיליון 'קודי קהילה'"""
     clean_c = normalize_code(code)
     if not clean_c or clean_c in ["0", "000000"]:
         return False, "קוד ריק"
@@ -669,7 +665,6 @@ def load_data_from_sheets():
             p_cat = str(get_field(p, "קטגוריה", "שם קטגוריה", "category_name", "category")).strip()
             p_kashrut = str(get_field(p, "כשרות", "כשרויות", "kashrut")).strip()
 
-            # בדיקת מלאי
             in_stock_flag = str(get_field(p, "במלאי", "in_stock", default="TRUE")).strip().upper()
             stock_qty_raw = str(get_field(p, "כמות במלאי", "כמות", "stock_qty", "stock")).strip()
             is_out_of_stock = False
@@ -685,7 +680,6 @@ def load_data_from_sheets():
                 except ValueError:
                     pass
 
-            # פענוח מאפיינים ותתי-סוגים (מידות, סוג בד וכו')
             attr_str = str(get_field(p, "מאפיינים", "אפשרויות", "סוגים", "attributes", "options")).strip()
             parsed_attributes = parse_product_attributes(attr_str)
 
@@ -808,7 +802,6 @@ def log_transaction_to_sheet(session_data: dict):
     CACHE["transactions"].append(tx_record)
     post_to_apps_script(tx_record)
 
-    # עדכון מלאי בשיטס עבור מוצרים שנקנו
     post_to_apps_script({
         "type": "decrement_stock",
         "items": [{"sku": i["sku"], "qty": i["qty"]} for i in cart]
@@ -942,30 +935,140 @@ def process_gabai_message(rec_path: str, caller_phone: str, user: Optional[dict]
     transcription = transcribe_audio_file_from_yemot(rec_path, token) if audio_bytes else ""
     sender_name = get_user_name(user) if user else "מאזין לא רשום"
     sender_id = get_user_id(user) if user else caller_phone
-    tzintuk_status = "רשום לצינתוק אישי" if (user and is_user_personal_tzintuk(user)) else "אינו רשום לצינתוק אישי"
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tzintuk_status = "רשום לקבלת צינתוק אישי" if (user and is_user_personal_tzintuk(user)) else "אינו רשום לצינתוק אישי"
+    ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
-    body_text = (
-        f"התקבלה הודעה חדשה לגבאי במערכת המכירות\n"
-        f"תאריך ושעה: {ts}\n"
-        f"שם: {sender_name}\n"
-        f"תעודת זהות / מזהה: {sender_id}\n"
-        f"טלפון מחייג: {caller_phone}\n"
+    transcription_display = transcription if transcription else "לא זוהה מלל בהקלטה. קובץ השמע המקורי מצורף להודעה זו."
+
+    plain_text = (
+        f"שלום רב,\n\n"
+        f"התקבלה הודעה קולית חדשה עבור הנהלת המערכת.\n\n"
+        f"פרטי הפנייה:\n"
+        f"שם הפונה: {sender_name}\n"
+        f"מספר טלפון: {caller_phone}\n"
+        f"מזהה / תעודת זהות: {sender_id}\n"
+        f"מועד ההודעה: {ts}\n"
         f"סטטוס צינתוק אישי: {tzintuk_status}\n"
-        f"נתיב בשלוחה 5: {rec_path}\n\n"
-        f"תמלול אוטומטי:\n{transcription or 'לא זוהה טקסט / שמע מצורף'}\n"
+        f"נתיב ההקלטה במרכזייה: שלוחה 5 ({rec_path})\n\n"
+        f"תמלול ההודעה:\n"
+        f"{transcription_display}\n\n"
+        f"בברכה,\nמערכת המכירות הטלפונית"
     )
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{
+            font-family: Arial, Tahoma, sans-serif;
+            direction: rtl;
+            text-align: right;
+            color: #222222;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f7f9fa;
+        }}
+        .email-container {{
+            max-width: 650px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border: 1px solid #dcdcdc;
+            border-radius: 4px;
+            padding: 30px;
+        }}
+        .header {{
+            font-size: 18px;
+            font-weight: bold;
+            color: #1a365d;
+            border-bottom: 2px solid #2b6cb0;
+            padding-bottom: 12px;
+            margin-bottom: 20px;
+        }}
+        .intro {{
+            font-size: 14px;
+            margin-bottom: 20px;
+            color: #333333;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 25px;
+        }}
+        th, td {{
+            padding: 9px 12px;
+            text-align: right;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 14px;
+        }}
+        th {{
+            width: 35%;
+            background-color: #f8fafc;
+            color: #4a5568;
+            font-weight: bold;
+        }}
+        td {{
+            color: #1a202c;
+        }}
+        .section-title {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #2d3748;
+            margin-bottom: 8px;
+        }}
+        .transcription-box {{
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-right: 4px solid #2b6cb0;
+            padding: 14px 16px;
+            font-size: 14px;
+            color: #2d3748;
+            white-space: pre-wrap;
+            margin-bottom: 25px;
+        }}
+        .footer {{
+            font-size: 12px;
+            color: #718096;
+            border-top: 1px solid #edf2f7;
+            padding-top: 15px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="header">הודעה קולית חדשה עבור הנהלת המערכת</div>
+        <div class="intro">שלום רב,<br>התקבלה פנייה קולית חדשה באמצעות שלוחת ההודעות לניהול. להלן פרטי הפנייה:</div>
+        <table>
+            <tr><th>שם הפונה:</th><td>{sender_name}</td></tr>
+            <tr><th>מספר טלפון מחייג:</th><td>{caller_phone}</td></tr>
+            <tr><th>מזהה / תעודת זהות:</th><td>{sender_id}</td></tr>
+            <tr><th>מועד קבלת ההודעה:</th><td>{ts}</td></tr>
+            <tr><th>סטטוס רישום לצינתוק אישי:</th><td>{tzintuk_status}</td></tr>
+            <tr><th>מיקום ההקלטה במערכת:</th><td>שלוחה 5 ({rec_path})</td></tr>
+        </table>
+        <div class="section-title">תמלול ההודעה:</div>
+        <div class="transcription-box">{transcription_display}</div>
+        <div class="footer">
+            הודעה זו הופקה ונשלחה באופן אוטומטי ממרכזיית המכירות. קובץ השמע המקורי מצורף להודעה זו.
+        </div>
+    </div>
+</body>
+</html>"""
 
     if SMTP_USER and SMTP_PASS and GABAI_EMAIL:
         try:
             msg = EmailMessage()
-            msg["Subject"] = f"הודעה חדשה לגבאי מאת {sender_name} ({caller_phone})"
+            msg["Subject"] = f"הודעה קולית לניהול המערכת מאת {sender_name} ({caller_phone})"
             msg["From"] = SMTP_USER
             msg["To"] = GABAI_EMAIL
-            msg.set_content(body_text)
+            msg.set_content(plain_text)
+            msg.add_alternative(html_content, subtype="html")
+
             if audio_bytes:
-                filename = os.path.basename(rec_path) or "gabai_message.wav"
+                filename = os.path.basename(rec_path) or "voice_message.wav"
                 msg.add_attachment(audio_bytes, maintype="audio", subtype="wav", filename=filename)
+
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
                 server.starttls()
                 server.login(SMTP_USER, SMTP_PASS)
@@ -984,6 +1087,7 @@ def process_gabai_message(rec_path: str, caller_phone: str, user: Optional[dict]
         "audio_path": rec_path,
         "transcription": transcription,
         "gabai_email": GABAI_EMAIL,
+        "html_body": html_content,
         "audio_base64": base64.b64encode(audio_bytes).decode("ascii") if audio_bytes else ""
     })
 
@@ -1164,6 +1268,15 @@ def play_current_product(session: dict, prefix: str = "") -> Response:
         )
 
     sound_chain = f"t-{msg}"
+    if USE_AUDIO_FILES:
+        sound_chain = (
+            f"{f't-{clean_tts(prefix)}.' if prefix else ''}"
+            f"f-/{AUDIO_FOLDER}/022a.t-מוצר.t-{p_name}."
+            f"f-/{AUDIO_FOLDER}/022b.t-מקט.t-{p_sku}."
+            f"t-{price_phrase}.{f't-{notes_str}.' if notes_str else ''}"
+            f"t-להוספה לסל הקישו את כמות היחידות להזמנה וסולמית לסיום, למוצר הבא הקישו סולמית בלבד, לחזרה הקישו כוכבית"
+        )
+
     session["step"] = "PRODUCT_LOOP"
     options = "no,3,1,7,No,no,no,,,1,Ok,NEXT,,no"
     return Response(content=f"read={sound_chain}=product_choice,{options}&rate=3&tts_rate=3", media_type="text/plain; charset=utf-8")
@@ -1175,7 +1288,6 @@ def ask_product_attribute(session: dict, prefix: str = "") -> Response:
     idx = session.get("attr_index", 0)
 
     if idx >= len(attrs):
-        # כל המאפיינים נבחרו - הוספה סופית לסל
         return add_product_to_cart_final(session)
 
     attr = attrs[idx]
@@ -1183,12 +1295,10 @@ def ask_product_attribute(session: dict, prefix: str = "") -> Response:
     session["step"] = "ATTR_INPUT"
 
     if attr["is_numeric"]:
-        # הקשה ישירה של מספר (כמו מידה)
         msg = f"{prefix}אנא הקישו את ה{attr_name} הרצויה ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית"
         opts = opts_digits_no_confirm(max_d=max(attr["max_len"], 3), min_d=1, allow_star=True)
         return yemot_read(msg, "attr_input", opts)
     else:
-        # תפריט בחירה רגיל (סוג בד, צווארון וכדו')
         menu_text = "".join([f"ל{opt} הקישו {i}, " for i, opt in enumerate(attr["options"], 1)])
         msg = f"{prefix}אנא בחרו {attr_name}: {menu_text} לחזרה הקישו כוכבית"
         max_d = max(1, len(str(len(attr["options"]))))
@@ -1405,9 +1515,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
         token = params.get("token") or YEMOT_TOKEN
         api_ext = params.get("ApiExtension", "").strip()
 
-        # ---------------------------------------------------------
-        # טיפול בניתוק שיחה + שמירת עסקה שלא הושלמה בשיטס
-        # ---------------------------------------------------------
+        # ניתוק שיחה + שמירת עסקה שלא הושלמה בשיטס
         if params.get("hangup") == "yes":
             ext_hangup = params.get("ApiHangupExtension", "")
             sess = SESSIONS.get(call_id)
@@ -1459,9 +1567,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
         non_api_params = {k: v for k, v in params.items() if not k.startswith("Api")}
         print(f"[REQ ext={api_ext or '/'} ep={'D' if from_tzintuk_endpoint else '/'}] שיחה:{str(call_id)[-6:]} | טל:{phone} | שלב={step} | פרמטרים={non_api_params}", flush=True)
 
-        # ---------------------------------------------------------
-        # שחזור וחזרה אוטומטית משלוחה /C -> /D (/tzintuk-done)
-        # ---------------------------------------------------------
+        # שחזור וחזרה אוטומטית משלוחה /C -> /D
         is_awaiting_c = step in ["REG_RETURN_FROM_TZINTUK", "UPD_RETURN_FROM_TZINTUK", "GABAI_RETURN_FROM_TZINTUK"]
         if is_awaiting_c or (from_tzintuk_endpoint and "reg_password" not in params and "reg_end_choice" not in params and step in ["WELCOME", "REG_RETURN_FROM_TZINTUK", "UPD_RETURN_FROM_TZINTUK", "GABAI_RETURN_FROM_TZINTUK"]):
             pending_c = pop_pending_tzintuk(call_id, phone)
@@ -1496,7 +1602,6 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 log_step(call_id, phone, "RETURN_FROM_C(/D)", "", "חזר מרישום צינתוק -> הקלטת הודעה לגבאי (/5)")
                 return yemot_read_record("נרשמתם לצינתוק אישי. כעת אנא השאירו את הודעתכם לגבאי ולאחר מכן הקישו סולמית", "gabai_msg", "/5", skip_menu=False)
 
-        # שליפת קלט נוכחי מהבקשה
         raw_user_input = ""
         expected_keys = STEP_PARAM_MAP.get(step, [])
         for key in expected_keys:
@@ -1631,7 +1736,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             if not user_input or not user_input.isdigit() or len(user_input) < 8 or len(user_input) > 9:
                 log_step(call_id, phone, step, user_input, "ת.ז לא תקינה -> בקשה חוזרת")
-                return yemot_read("אנא הקישו מספר תעודת זהות תקין בן 8 עד 9 ספרות ולאחר מכן סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
+                return yemot_read("אנא הקישו מספר תעודת זהות תקין בן 8 עד 9 ספרות ולאחר מכן הקישו סולמית, לחזרה הקישו כוכבית וסולמית", "login_id", opts_digits_confirm(9, 1, 7, allow_star=True), "003")
 
             if user_input in CACHE["users"]:
                 user = CACHE["users"][user_input]
@@ -2096,7 +2201,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 log_step(call_id, phone, step, "*", "חזרה לרשימת המוצרים")
                 return show_category_products_menu(session)
 
-            # סולמית בלבד או המתנה של 5 שניות עוברים למוצר הבא
+            # סולמית בלבד או המתנה של 7 שניות עוברים למוצר הבא
             if user_input in ["NEXT", "None", "", "ok"]:
                 products = session.get("filtered_products", [])
                 session["product_index"] = (session.get("product_index", 0) + 1) % len(products)
@@ -2107,7 +2212,6 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             idx = session.get("product_index", 0)
             p = products[idx]
 
-            # הקשת כמות יחידות ישירות מהמוצר
             try:
                 qty = int(user_input)
                 if qty <= 0:
@@ -2125,13 +2229,11 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 attrs = p.get("attributes", [])
 
                 if attrs:
-                    # למוצר יש תתי-מאפיינים (מידות, סוג בד וכו')
                     session["attr_index"] = 0
                     session["selected_attrs"] = {}
-                    log_step(call_id, phone, step, str(qty), f"נקלטה כמות {qty} למוצר עם מאפיינים ➔ מעבר לבחירת מאפיין ראשון ({attrs[0]['name']})")
+                    log_step(call_id, phone, step, str(qty), f"נקלטה כמות {qty} למוצר עם מאפיינים -> מעבר לבחירת מאפיין ראשון ({attrs[0]['name']})")
                     return ask_product_attribute(session)
                 else:
-                    # מוצר רגיל - הוספה ישירה לסל
                     return add_product_to_cart_final(session)
 
             except ValueError:
@@ -2139,7 +2241,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                 return play_current_product(session, prefix="הקשה שגויה. ")
 
         # ---------------------------------------------------------
-        # בחירת מאפיינים למוצר מורכב (מידה ישירה במספרים, או תפריט)
+        # בחירת מאפיינים (מידות, סוג בד וכו')
         # ---------------------------------------------------------
         elif step == "ATTR_INPUT":
             products = session.get("filtered_products", [])
@@ -2151,7 +2253,6 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
             if is_back:
                 if idx > 0:
                     session["attr_index"] = idx - 1
-                    # מחיקת הבחירה הקודמת
                     prev_name = attrs[idx - 1]["name"]
                     session["selected_attrs"].pop(prev_name, None)
                     log_step(call_id, phone, step, "*", f"חזרה למאפיין הקודם ({prev_name})")
@@ -2161,7 +2262,6 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                     return play_current_product(session)
 
             if attr["is_numeric"]:
-                # הקשה ישירה של מספר (כגון מידה 14-17)
                 typed_val = user_input
                 if typed_val in attr["options"]:
                     session["selected_attrs"][attr["name"]] = typed_val
@@ -2173,7 +2273,6 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
                     err_msg = f"מוצר זה אינו קיים במלאי ב{clean_tts(attr['name'])} {typed_val}. "
                     return ask_product_attribute(session, prefix=err_msg)
             else:
-                # בחירה מתוך תפריט (כותנה, לייקרה וכו')
                 try:
                     choice_opt_idx = int(user_input) - 1
                     if 0 <= choice_opt_idx < len(attr["options"]):
@@ -2392,7 +2491,7 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
 
             is_valid_code, comm_name_or_err = validate_community_code(user_input)
             if not is_valid_code:
-                return yemot_read("קוד הקהילה שהוקש אינו מוגדר או שאינו משויך לקהילה פעילה במערכת. אנא הקישו קוד תקין ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(9, 1, 7, allow_star=True), "015")
+                return yemot_read("קוד הקהילה שהוקש אינו מוגדר או שאינו משויך לקהילה פעילה במערכת. אנא הקישו שוב ולאחר מכן סולמית, או הקישו כוכבית וסולמית לחזרה", "upd_comm_input", opts_digits_confirm(9, 1, 7, allow_star=True), "015")
 
             user = session["user"]
             norm_c = normalize_code(user_input)
@@ -2521,5 +2620,4 @@ async def handle_ivr_request(request: Request, background_tasks: BackgroundTasks
     except Exception as e:
         print(f"[CRITICAL ERROR] {e}\n{traceback.format_exc()}", flush=True)
         return show_welcome(SESSIONS.get(call_id, {}), prefix="אירעה שגיאה זמנית, ")
-
 
