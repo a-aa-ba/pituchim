@@ -38,7 +38,7 @@ ALLOWED_PHONES_WHEN_CLOSED = [
 ]
 
 # 2. שימוש בקבצי הקלטה מהתיקייה הראשית (True = השמעת הקלטות מערכת)
-USE_AUDIO_FILES = True
+USE_AUDIO_FILES = False
 AUDIO_FOLDER = "הודעות מערכת"
 # ===================================================================
 
